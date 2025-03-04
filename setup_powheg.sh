@@ -1,11 +1,13 @@
 #!/bin/bash
 POWHEG_VERSION="3604"
 
-if [ ! -d "POWHEG-BOX-V2" ]; then
+if [ ! -d "generators/POWHEG-BOX-V2" ]; then
+    mkdir -p generators/ && cd generators
     svn checkout --no-auth-cache --revision ${POWHEG_VERSION} --username anonymous --password anonymous svn://powhegbox.mib.infn.it/trunk/POWHEG-BOX-V2
+    cd ../
 fi
 
-pushd POWHEG-BOX-V2
+pushd generators/POWHEG-BOX-V2
     if [ ! -d "gg_H_2HDM" ]; then
         svn co --no-auth-cache --revision ${POWHEG_VERSION} --username anonymous --password anonymous svn://powhegbox.mib.infn.it/trunk/User-Processes-V2/gg_H_2HDM
     fi    
@@ -13,13 +15,15 @@ pushd POWHEG-BOX-V2
     pushd gg_H_2HDM
         # modify the makefile to use -fallow-argument-mismatch compiler flag
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' "s/FFLAGS= -Wall/FFLAGS= -Wall -fallow-argument-mismatch/" Makefile
-            sed -i '' "s/FJCXXFLAGS+= $(shell \$(LHAPDF_CONFIG) --cxxflags)/FJCXXFLAGS+= $(shell \$(LHAPDF_CONFIG) --cxxflags) -std=c++11 /" Makefile
-            sed -i '' "s/LIBS+= -lchaplin/LIBS+= -lchaplin -L lib/" Makefile
+            echo "Mac OS detected, changing makefile of Powheg"
+            gsed -i "s/FFLAGS= -Wall/FFLAGS= -Wall -fallow-argument-mismatch/" Makefile
+            gsed -i "s/FJCXXFLAGS+= $(shell \$(LHAPDF_CONFIG) --cxxflags)/FJCXXFLAGS+= $(shell \$(LHAPDF_CONFIG) --cxxflags) -std=c++11 /" Makefile
+            gsed -i "s/LIBS+= -lchaplin/LIBS+= -lchaplin -L lib/" Makefile
             # replace -lstdc++ with -lc++ for MAC OS
-            sed -i '' "s/-lstdc++/-lc++/" Makefile
+            gsed -i "s/-lstdc++/-lc++/" Makefile
 
         else
+            echo "Linux detected, changing makefile of Powheg"
             sed -i "s/FFLAGS= -Wall/FFLAGS= -Wall -fallow-argument-mismatch/" Makefile
             sed -i "s/FJCXXFLAGS+= $(shell \$(LHAPDF_CONFIG) --cxxflags)/FJCXXFLAGS+= $(shell \$(LHAPDF_CONFIG) --cxxflags) -std=c++11 /" Makefile
             sed -i "s/LIBS+= -lchaplin/LIBS+= -lchaplin -L lib/" Makefile
@@ -37,5 +41,12 @@ pushd POWHEG-BOX-V2
 
         # compile powheg
         make pwhg_main
+
+        # compile input card
+        cp ../../configs/powheg/powheg.input powheg.input
     popd
 popd
+
+# install PDF sets with LHAPDF
+lhapdf install NNPDF30_nlo_as_0118
+lhapdf install MSTW2008nlo68cl

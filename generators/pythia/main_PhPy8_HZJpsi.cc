@@ -14,11 +14,12 @@ int main() {
 
   // --- Input configuration: LHE file ---
   pythia.readString("Beams:frameType = 4");
+  pythia.readString("Beams:LHEF = input.lhe"); // <-- Replace with your LHE file
 
   // --- Process/decay configuration ---
   pythia.readString("25:onMode = off");
-  pythia.readString("25:addChannel = 1 0.002 100 441 23");
-  pythia.readString("441:onMode = on");
+  pythia.readString("25:addChannel = 1 0.002 100 443 23");
+  pythia.readString("443:onMode = on");
   pythia.readString("23:onMode = off");
   pythia.readString("23:onIfAny = 11 13 15");
 
@@ -75,7 +76,7 @@ int main() {
 
   // Set up the HepMC output
   HepMC::Pythia8ToHepMC ToHepMC;
-  HepMC::IO_GenEvent hepmc_io("hepmc_output.hepmc", std::ios::out);
+  HepMC::IO_GenEvent hepmc_io("hepmc_output_HZJpsi.hepmc", std::ios::out);
 
   // --- Event loop ---
   int nEvents = 10000;

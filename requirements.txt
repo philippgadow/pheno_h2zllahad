@@ -1,0 +1,8 @@
+numpy
+pandas
+uproot
+mplhep
+coffea
+hist
+matplotlib
+scikit-learn

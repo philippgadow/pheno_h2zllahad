@@ -4,3 +4,14 @@
 # micromamba
 bin/
 micromamba/
+
+# generators
+generators/POWHEG-BOX-V2
+
+# transient files
+output/
+*.lhe
+*.hepmc
+*.root
+*.pdf
+*.png

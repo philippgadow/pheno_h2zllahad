@@ -56,10 +56,14 @@ fi
 
 # Create environment if it doesn't exist
 if ! $MAMBA_EXE env list | grep -q "micromamba_h2zllahad"; then
+    echo "Creating micromamba environment"
     $MAMBA_EXE create -y --name micromamba_h2zllahad python=3.9
 fi
 
 # Activate environment properly
 micromamba activate micromamba_h2zllahad
-micromamba install -y conda-forge::subversion conda-forge::fortran-compiler
-micromamba install -y conda-forge::pythia8 conda-forge::hepmc2 conda-forge::hepmc3 conda-forge::lhapdf
+micromamba install -y conda-forge::subversion conda-forge::fortran-compiler conda-forge::sed
+micromamba install -y conda-forge::pythia8 conda-forge::hepmc2 conda-forge::hepmc3 conda-forge::lhapdf conda-forge::delphes conda-forge::root
+
+# Install python package and dependencies in local editable mode (-e)
+pip install -e .
