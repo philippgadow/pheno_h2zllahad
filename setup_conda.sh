@@ -65,5 +65,4 @@ micromamba activate micromamba_h2zllahad
 micromamba install -y conda-forge::subversion conda-forge::fortran-compiler conda-forge::sed
 micromamba install -y conda-forge::pythia8 conda-forge::hepmc2 conda-forge::hepmc3 conda-forge::lhapdf conda-forge::delphes conda-forge::root
 
-# Install python package and dependencies in local editable mode (-e)
-pip install -e .
+pip install -r requirements.txt

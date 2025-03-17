@@ -21,3 +21,13 @@ run_delphes() {
 # Run Delphes with CMS card
 run_delphes ${OUTPUTDIR}/hepmc_output_HZetac.hepmc
 run_delphes ${OUTPUTDIR}/hepmc_output_HZJpsi.hepmc
+run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA0.50GeV.hepmc
+run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA0.75GeV.hepmc
+run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA1.00GeV.hepmc
+run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA1.50GeV.hepmc
+run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA2.00GeV.hepmc
+run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA2.50GeV.hepmc
+run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA3.00GeV.hepmc
+run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA3.50GeV.hepmc
+run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA4.00GeV.hepmc
+run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA8.00GeV.hepmc
