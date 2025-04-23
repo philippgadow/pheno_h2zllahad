@@ -62,7 +62,7 @@ fi
 
 # Activate environment properly
 micromamba activate micromamba_h2zllahad
-micromamba install -y conda-forge::subversion conda-forge::fortran-compiler conda-forge::sed
+micromamba install -y conda-forge::subversion conda-forge::fortran-compiler conda-forge::sed conda install conda-forge::libzip conda install conda-forge::cmake
 micromamba install -y conda-forge::pythia8 conda-forge::hepmc2 conda-forge::hepmc3 conda-forge::lhapdf conda-forge::delphes conda-forge::root
 
 pip install -r requirements.txt
