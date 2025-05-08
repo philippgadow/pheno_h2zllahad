@@ -18,7 +18,7 @@ run_delphes() {
 }
 
 
-# Run Delphes with CMS card
+# Run Delphes with CMS card for signals
 run_delphes ${OUTPUTDIR}/hepmc_output_HZetac.hepmc
 run_delphes ${OUTPUTDIR}/hepmc_output_HZJpsi.hepmc
 run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA0.50GeV.hepmc
@@ -31,3 +31,7 @@ run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA3.00GeV.hepmc
 run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA3.50GeV.hepmc
 run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA4.00GeV.hepmc
 run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA8.00GeV.hepmc
+
+# Run Delphes with CMS card for backgrounds
+OUTPUTDIR=output/Zjets
+run_delphes ${OUTPUTDIR}/hepmc_output_Zjets.hepmc
