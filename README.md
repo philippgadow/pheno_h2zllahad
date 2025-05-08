@@ -50,6 +50,23 @@ Install the Powheg event generator and the code required for calculating the pro
 source setup_powheg.sh
 ```
 
+3. Install Madgraph
+
+Install MadGraph5aMC@NLO to generate background events on parton level as LHE files. This is used for Z+jets background.
+
+```bash
+source setup_madgraph.sh
+```
+
+4. Install Sherpa
+
+Install the Sherpa event generator to generate Z+jets background events
+
+```bash
+source setup_sherpa.sh
+
+# attention, this does not yet work!
+```
 
 ## Event generation
 
@@ -61,14 +78,40 @@ source run.sh
 
 This will run the following scripts in the following order.
 
-    1. `run_powheg.sh`
-    2. `run_pythia.sh`
+    1. `run_powheg.sh` and `run_madgraph.sh`
+    2. `run_pythia_signal.sh` and `run_pythia_zjets.sh`
     3. `run_delphes.sh`
 
-As a result, you should find the directory `output/ggH_2HDM` populated with the output of the respective steps.
+As a result, you should find the directory `output/ggH_2HDM` populated with the output of the respective steps, simiarly `output/Zjets`.
 
 ## Exploratory analysis
 
 The directory `jupyter` contains jupyter notebooks for exploratory data analysis.
 The analysis is based on [`coffea`](https://coffea-hep.readthedocs.io/en/latest/) for columnar analysis in python.
 
+## Analysis scripts
+
+This directory contains analysis scripts to process and visualize Delphes output and compare against reference data.
+
+- `compare_signal_bkg.py`: Plots and compares the leading jet transverse momentum (`pT`) and invariant mass between signal and background samples. The output is a set of normalized histograms for basic signal vs background separation.
+
+- `compare_with_atlas.py`: Compares the leading muon `pT` distribution between ATLAS TRUTH3 data and Delphes simulation. Produces a plot with both distributions and their ratio to assess agreement.
+
+- `plot_truth_overlay.py`: Overlays truth-level distributions across multiple samples. For each input file, it plots:
+    - Z boson invariant mass
+    - η_c (PID 441): mass, `pT`, and pseudorapidity
+    - J/ψ (PID 443): mass, `pT`, and pseudorapidity
+    - A (PID 36): mass, `pT`, and pseudorapidity
+
+- `plot_truth.py`: Plots truth-level information from a single Delphes ROOT file, depending on the decay channel inferred from the filename:
+    - Z boson invariant mass
+    - η_c, J/ψ, or A: mass, `pT`, and pseudorapidity (based on presence in the sample)
+
+
+## Data files on lxplus
+
+Data files have been made accessible on CERN lxplus:
+
+```bash
+/afs/cern.ch/work/p/pgadow/public/HZa_share
+```

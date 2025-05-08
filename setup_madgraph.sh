@@ -8,9 +8,8 @@ pushd generators
     wget $MG5_URL
     tar xvf $MG5_TAR
     rm $MG5_TAR
-    pushd $MG5_DIR
-        # Set pythia8 path and install interface in madgraph
-        echo "set pythia8-path $(pythia8-config --prefix)" | ./bin/mg5_aMC
-        echo "install mg5amc_py8_interface" | ./bin/mg5_aMC
-    popd
+    # pushd $MG5_DIR
+    #     # Set pythia8 path and install interface in madgraph
+    #     echo "install mg5amc_py8_interface" | ./bin/mg5_aMC
+    # popd
 popd

@@ -7,6 +7,7 @@ micromamba/
 
 # generators
 generators/POWHEG-BOX-V2
+generators/MG5_aMC_v3_6_2
 
 # transient files
 output/
