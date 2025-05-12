@@ -8,5 +8,6 @@ mkdir -p simpleanalysis/build/
 cd simpleanalysis/build/
 cmake /opt/SimpleAnalysis/
 make 
+cd ../..
 
-# simpleAnalysis [-a listOfAnalysis] <inputFile1> [inputFile2]...
+./simpleanalysis/build/x86_64-centos7-gcc8-opt/bin/simpleAnalysis -a HZa2018 --input-files $PWD/atlas_truth3/mc15_13TeV.361106.PowhegPythia8EvtGen_AZNLOCTEQ6L1_Zee.DAOD_TRUTH3.root

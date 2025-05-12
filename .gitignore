@@ -9,6 +9,9 @@ micromamba/
 generators/POWHEG-BOX-V2
 generators/MG5_aMC_v3_6_2
 
+# simple analysis
+simpleanalysis/build/
+
 # transient files
 output/
 *.lhe
