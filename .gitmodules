@@ -1,0 +1,3 @@
+[submodule "simpleanalysis/simple-analysis"]
+	path = simpleanalysis/simple-analysis
+	url = ssh://git@gitlab.cern.ch:7999/atlas-sa/simple-analysis.git
