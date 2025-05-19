@@ -13,6 +13,7 @@ DefineAnalysis(HZa2018)
 
 void HZa2018::Init() {
     addRegions({"Inclusive"});
+    addRegions({"SR"});
 
     // Jet Histograms
     addHistogram("hist_jet1pt", 100, 0, 2000);
@@ -24,6 +25,9 @@ void HZa2018::Init() {
     addHistogram("hist_electron_pt", 100, 0, 500);
     addHistogram("hist_muon_pt", 100, 0, 500);
 
+    // Leading Jet Mass
+    addHistogram("hist_jet1mass", 40, 0, 20);
+
     // Z Candidate Mass
     addHistogram("hist_z_mass", 60, 60, 120);
 
@@ -32,6 +36,9 @@ void HZa2018::Init() {
 }
 
 void HZa2018::ProcessEvent(AnalysisEvent *event) { 
+
+    // Accept event into Inclusive region
+    accept("Inclusive");
 
     // Jets with baseline kinematics
     auto jets = event->getJets(20.0, 2.5);
@@ -47,33 +54,43 @@ void HZa2018::ProcessEvent(AnalysisEvent *event) {
     for (const auto& mu : muons) fill("hist_muon_pt", mu.Pt());
     for (const auto& el : electrons) fill("hist_electron_pt", el.Pt());
 
-    // Merge leptons into one vector
-    auto leptons = electrons;
-    leptons.insert(leptons.end(), muons.begin(), muons.end());
-    std::cout << leptons.size() << " leptons" << std::endl;
-
     // Require at least 2 leptons
-    if (leptons.size() < 2) return;
+    if (!((muons.size() >= 2) || (electrons.size() >= 2))) return;
 
     // Select best SFOS lepton pair closest to Z mass
     double best_mll = -999;
     size_t idx1 = 0, idx2 = 1;
-    bool foundPair = false;
-    for (size_t i = 0; i < leptons.size(); ++i) {
-        for (size_t j = i+1; j < leptons.size(); ++j) {
-            if (leptons[i].charge() * leptons[j].charge() >= 0) continue;
-            if (abs(leptons[i].pdgId()) != abs(leptons[j].pdgId())) continue;
-            double mll = (leptons[i] + leptons[j]).M();
-            if (!foundPair || fabs(mll - 91.1876) < fabs(best_mll - 91.1876)) {
+    bool foundPairMuons = false;
+    bool foundPairElectrons = false;
+    for (size_t i = 0; i < muons.size(); ++i) {
+        for (size_t j = i+1; j < muons.size(); ++j) {
+            if (muons[i].charge() * muons[j].charge() >= 0) continue;
+            double mll = (muons[i] + muons[j]).M();
+            if (!foundPairMuons || fabs(mll - 91.1876) < fabs(best_mll - 91.1876)) {
                 best_mll = mll;
                 idx1 = i;
                 idx2 = j;
-                foundPair = true;
+                foundPairMuons = true;
+            }
+        }
+    }
+    for (size_t i = 0; i < electrons.size(); ++i) {
+        for (size_t j = i+1; j < electrons.size(); ++j) {
+            if (electrons[i].charge() * electrons[j].charge() >= 0) continue;
+            double mll = (electrons[i] + electrons[j]).M();
+            if (!foundPairElectrons || fabs(mll - 91.1876) < fabs(best_mll - 91.1876)) {
+                best_mll = mll;
+                idx1 = i;
+                idx2 = j;
+                foundPairElectrons = true;
             }
         }
     }
 
-    if (!foundPair || best_mll < 81.0 || best_mll > 101.0) return;
+    if (!(foundPairMuons || foundPairElectrons) || best_mll < 81.0 || best_mll > 101.0) return;
+
+    // Merge leptons into one vector
+    auto leptons = foundPairElectrons ? electrons : muons;
     if (std::max(leptons[idx1].Pt(), leptons[idx2].Pt()) < 27.0) return;
 
     // Fill Z candidate mass histogram
@@ -104,11 +121,14 @@ void HZa2018::ProcessEvent(AnalysisEvent *event) {
     // Fill three-body mass histogram
     fill("hist_mllj", mllj);
 
+    // Fill leading jet mass histogram
+    if (jets.size() >= 1) fill("hist_jet1mass", jets[0].M());
+
 
     // NN classifier placeholder
     // double nn_output = computeNNOutput(jets[0]); // Replace with actual NN call
     // if (nn_output <= 0.93) return;
 
-    // Accept event into Inclusive region
-    accept("Inclusive");
+    // Accept event into signal region (SR)
+    accept("SR");
 }

@@ -68,6 +68,17 @@ source setup_sherpa.sh
 # attention, this does not yet work!
 ```
 
+5. "Install" SimpleAnalysis
+
+To set up a docker container for simple analysis, you can run the following script (you will have to use a separate shell for the docker container):
+
+```bash
+source setup_simpleanalysis.sh
+```
+
+This command will run a docker command to set up simple analysis. It is assumed that you have Docker installed and running on your machine.
+
+
 ## Event generation
 
 You can run all steps of the event generation with the script `run.sh`.
@@ -106,6 +117,29 @@ This directory contains analysis scripts to process and visualize Delphes output
 - `plot_truth.py`: Plots truth-level information from a single Delphes ROOT file, depending on the decay channel inferred from the filename:
     - Z boson invariant mass
     - η_c, J/ψ, or A: mass, `pT`, and pseudorapidity (based on presence in the sample)
+
+
+## SimpleAnalysis
+
+### Conversion from Delphes ROOT files to SimpleAnalysis ntuples
+
+You can convert Delphes ROOT files to SimpleAnalysis ntuples using the following script. It should work out of the box if you have activated the conda environment earlier.
+
+```bash
+python simpleanalysis/Delphes2SA.py <delphes file> <output file name>
+```
+
+### Running SimpleAnalysis in Docker container
+
+As explained above, you should start a Docker container with the simpleanalysis image, using the `setup_simpleanalysis.sh` script.
+
+Then you can copy the analysis to the SimpleAnalysis event folder, compile everything and execute it. All commands are summarised in the script
+
+```bash
+source run_simpleanalysis.sh
+```
+
+As a result, you will find a ROOT file called with the name of the analysis `HZA2018.root`, which contains the histograms.
 
 
 ## Data files on lxplus

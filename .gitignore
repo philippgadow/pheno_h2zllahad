@@ -11,6 +11,7 @@ generators/MG5_aMC_v3_6_2
 
 # simple analysis
 simpleanalysis/build/
+HZa2018.txt
 
 # transient files
 output/
