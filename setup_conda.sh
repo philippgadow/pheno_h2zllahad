@@ -66,4 +66,6 @@ micromamba install -y conda-forge::subversion conda-forge::fortran-compiler cond
 micromamba install -y conda-forge::root
 micromamba install -y conda-forge::pythia8 conda-forge::hepmc2 conda-forge::hepmc3 conda-forge::lhapdf
 micromamba install -y conda-forge::delphes
+micromamba install -y conda-forge::fastjet
 pip install -r requirements.txt
+python -m pip install fastjet
