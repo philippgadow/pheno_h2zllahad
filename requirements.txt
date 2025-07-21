@@ -6,3 +6,6 @@ coffea
 hist
 matplotlib
 scikit-learn
+h5py
+rich
+torch

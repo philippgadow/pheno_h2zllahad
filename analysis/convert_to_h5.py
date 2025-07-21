@@ -2,17 +2,9 @@
 """
 Delphes ROOT to ML Pipeline for Jet Tagging
 
-This pipeline reads Delphes ROOT files generated with CMS datacards,
+This script reads Delphes ROOT files generated with CMS datacards,
 extracts jet information and constituents, and prepares data for 
 machine learning training.
-
-Requirements:
-- uproot (pip install uproot)
-- numpy
-- pandas
-- h5py
-- scikit-learn
-- tqdm
 
 Usage:
     python delphes_pipeline.py --input /path/to/delphes_files/ --output /path/to/output/
@@ -27,7 +19,8 @@ import uproot
 import h5py
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
-from tqdm import tqdm
+from rich.progress import Progress
+from tqdm.rich import tqdm
 import logging
 
 # Configure logging
@@ -115,7 +108,12 @@ class DelphesProcessor:
             return [], {}
     
     def _extract_jets(self, tree) -> List[Dict]:
-        """Extract jet information from Delphes tree"""
+        """
+        Extract jet-level information and basic features from the Delphes tree.
+
+        Returns:
+            List of jet dictionaries with kinematic variables, tags, constituents, and optional flavor.
+        """
         try:
             # Read jet branches
             jet_branches = {}
@@ -167,6 +165,13 @@ class DelphesProcessor:
                         
                         # Add constituent information
                         jet_info['constituents'] = constituent_data.get(event_idx, {}).get(jet_idx, [])
+
+                        # Add flavor information if available
+                        if f"{jet_branch_name}.Flavor" in tree:
+                            jet_info['Flavor'] = tree[f"{jet_branch_name}.Flavor"].array(library="np")[event_idx][jet_idx]
+
+                        # Add event index for tracking
+                        jet_info["event_idx"] = event_idx
                         
                         event_jets.append(jet_info)
                 
@@ -179,7 +184,12 @@ class DelphesProcessor:
             return []
     
     def _extract_constituents(self, tree) -> Dict:
-        """Extract jet constituents from EFlow objects"""
+        """
+        Extract jet constituent features from EFlow objects.
+
+        Returns:
+            Dictionary mapping event and jet index to lists of constituent feature dicts.
+        """
         constituent_data = {}
         
         try:
@@ -215,38 +225,53 @@ class DelphesProcessor:
             logger.warning(f"Could not extract constituents: {e}")
             return {}
     
-    def _extract_truth_info(self, tree) -> Dict:
-        """Extract truth-level information for jet labeling"""
+    def _extract_truth_info(self, tree) -> Dict[int, List[Dict]]:
+        """
+        Extract truth-level particles of interest (e.g. Higgs, J/ψ, η_c) from the Delphes tree.
+
+        Returns:
+            Dictionary mapping event indices to lists of selected particle dictionaries.
+        """
         truth_data = {}
-        
+
         try:
-            # Look for truth particles or generator-level information
-            truth_branches = ['Particle', 'GenParticle']
-            
-            for branch_name in truth_branches:
-                if f"{branch_name}.PT" in tree:
-                    # Extract truth particle information
-                    truth_pts = tree[f"{branch_name}.PT"].array(library="np")
-                    truth_etas = tree[f"{branch_name}.Eta"].array(library="np")
-                    truth_phis = tree[f"{branch_name}.Phi"].array(library="np")
-                    
-                    if f"{branch_name}.PID" in tree:
-                        truth_pids = tree[f"{branch_name}.PID"].array(library="np")
-                    else:
-                        truth_pids = None
-                    
-                    # Process truth information
-                    # This is where you'd implement your specific truth-matching logic
-                    break
-            
-            return truth_data
-            
+            if "Particle.PID" not in tree or "Particle.Status" not in tree:
+                logger.warning("Missing Particle.PID or Particle.Status in tree")
+                return truth_data
+
+            pids = tree["Particle.PID"].array(library="np")
+            statuses = tree["Particle.Status"].array(library="np")
+            etas = tree["Particle.Eta"].array(library="np")
+            phis = tree["Particle.Phi"].array(library="np")
+
+            for i, (pid_arr, status_arr, eta_arr, phi_arr) in enumerate(zip(pids, statuses, etas, phis)):
+                event_particles = []
+                for pid, status, eta, phi in zip(pid_arr, status_arr, eta_arr, phi_arr):
+                    if (status == 1 or status == 2 or status == 22) and (pid == 36 or pid == 35 or pid == 25 or pid == 443 or pid == 441):
+                        event_particles.append({
+                            "PID": pid,
+                            "Status": status,
+                            "Eta": eta,
+                            "Phi": phi
+                        })
+                truth_data[i] = event_particles
+
         except Exception as e:
             logger.warning(f"Could not extract truth info: {e}")
-            return {}
-    
+
+        return truth_data
+            
     def _combine_jet_truth(self, jets_data: List[Dict], truth_data: Dict) -> List[JetInfo]:
-        """Combine jet reconstruction with truth information"""
+        """
+        Combine jet reconstruction data with truth particle matching.
+
+        Args:
+            jets_data: List of raw jet dictionaries.
+            truth_data: Dictionary of truth particles indexed by event.
+
+        Returns:
+            List of JetInfo dataclass objects with constituents and truth labels.
+        """
         jet_list = []
         
         for jet_dict in jets_data:
@@ -284,60 +309,93 @@ class DelphesProcessor:
     
     def _determine_truth_flavor(self, jet_dict: Dict, truth_data: Dict) -> int:
         """
-        Determine the truth flavor of a jet based on truth information
-        
+        Assign a truth-level label to a jet by matching to known signal particles via ΔR.
+
+        Matching priorities:
+            - PID 36 → return 36
+            - PID 35 or 25 → return 25
+            - PID 443 → return 443
+            - PID 441 → return 441
+            - Fallback: Jet flavor if available
+            - Default: 0
+
         Returns:
-            0: light quark (u, d, s)
-            1: charm quark
-            2: bottom quark
-            3: gluon
-            4: tau lepton
-            5: other
+            Integer label indicating jet truth category.
         """
-        # Placeholder implementation
-        # In reality, you'd match truth particles to jets and determine flavor
-        
-        # Use b-tagging information as a proxy
-        if jet_dict.get('BTag', 0) > 0:
-            return 2  # bottom quark
-        elif jet_dict.get('TauTag', 0) > 0:
-            return 4  # tau lepton
-        else:
-            # Random assignment for demonstration
-            return np.random.randint(0, 4)
+        jet_eta = jet_dict.get("Eta", 0.0)
+        jet_phi = jet_dict.get("Phi", 0.0)
+        event_idx = jet_dict.get("event_idx", None)
+
+        def delta_r(eta1, phi1, eta2, phi2):
+            dphi = np.arctan2(np.sin(phi1 - phi2), np.cos(phi1 - phi2))
+            deta = eta1 - eta2
+            return np.sqrt(deta**2 + dphi**2)
+
+        # Try to match to known signal particles (e.g. 36, 35, 25, 443, 441) within ΔR < 0.3
+        if event_idx is not None and event_idx in truth_data:
+            for particle in truth_data[event_idx]:
+                dR = delta_r(jet_eta, jet_phi, particle["Eta"], particle["Phi"])
+                if dR < 0.3 and particle["Status"] in [1, 2, 22]:
+                    # Hadronically decaying "a" (BSM) Higgs boson
+                    if particle["PID"] == 36:
+                        return 36
+                    # SM Higgs boson
+                    # hack in LHE: SM Higgs is PID 35 so that it can decay to BSM Higgs with PDG ID 36
+                    elif particle["PID"] == 35:
+                        return 25
+                    # SM Higgs boson
+                    elif particle["PID"] == 25:
+                        return 25
+                    # J/Psi meson
+                    elif particle["PID"] == 443:
+                        return 443
+                    # eta_c meson
+                    elif particle["PID"] == 441:
+                        return 441
+
+        # Fall back to Jet Flavor
+        if jet_dict.get('Flavor', 0) > 0:
+            return jet_dict.get("Flavor", 0.0)
+        return 0
+
     
-    def process_files(self, input_dir: str, file_pattern: str = "*.root") -> Tuple[List[JetInfo], List[Dict]]:
+    def process_files(self, input_path: str, file_pattern: str = "*.root") -> Tuple[List[JetInfo], List[Dict]]:
         """
-        Process all ROOT files in a directory
-        
+        Process a ROOT file or all ROOT files in a directory
+
         Args:
-            input_dir: Directory containing Delphes ROOT files
-            file_pattern: Pattern to match ROOT files
-            
+            input_path: Path to a Delphes ROOT file or directory containing ROOT files
+            file_pattern: Pattern to match ROOT files if input is a directory
+
         Returns:
             Tuple of (all_jets, metadata_list)
         """
-        # Find all ROOT files
-        file_pattern_path = os.path.join(input_dir, file_pattern)
-        root_files = glob.glob(file_pattern_path)
-        
-        if not root_files:
-            raise ValueError(f"No ROOT files found in {input_dir} matching {file_pattern}")
-        
-        logger.info(f"Found {len(root_files)} ROOT files to process")
-        
+        if os.path.isfile(input_path):
+            # Process a single file
+            root_files = [input_path]
+        elif os.path.isdir(input_path):
+            # Process all matching files in the directory
+            file_pattern_path = os.path.join(input_path, file_pattern)
+            root_files = glob.glob(file_pattern_path)
+            if not root_files:
+                raise ValueError(f"No ROOT files found in {input_path} matching {file_pattern}")
+        else:
+            raise ValueError(f"Input path {input_path} is neither a valid file nor a directory")
+
+        logger.info(f"Found {len(root_files)} ROOT file(s) to process")
+
         all_jets = []
         metadata_list = []
-        
-        # Process each file
+
         for filepath in tqdm(root_files, desc="Processing files"):
             jets, metadata = self.read_delphes_file(filepath)
             all_jets.extend(jets)
             metadata_list.append(metadata)
-        
-        logger.info(f"Processed {len(all_jets)} jets from {len(root_files)} files")
-        
+
+        logger.info(f"Processed {len(all_jets)} jets from {len(root_files)} file(s)")
+
         return all_jets, metadata_list
+
 
 class MLDataConverter:
     """Convert processed jet data to ML-ready formats"""
@@ -347,13 +405,14 @@ class MLDataConverter:
     
     def jets_to_arrays(self, jets: List[JetInfo]) -> Dict[str, np.ndarray]:
         """
-        Convert jet list to numpy arrays for ML training
-        
-        Args:
-            jets: List of JetInfo objects
-            
+        Convert structured JetInfo list into numpy arrays for ML training.
+
         Returns:
-            Dictionary containing feature arrays and labels
+            Dictionary with keys:
+                - 'jet_features': shape (N, 6)
+                - 'constituent_features': shape (N, max_constituents, 6)
+                - 'constituent_mask': shape (N, max_constituents), bool
+                - 'labels': shape (N,)
         """
         n_jets = len(jets)
         
@@ -389,7 +448,13 @@ class MLDataConverter:
         }
     
     def save_hdf5(self, data_dict: Dict[str, np.ndarray], output_path: str):
-        """Save data to HDF5 format"""
+        """
+        Save jet and constituent data to an HDF5 file.
+
+        Args:
+            data_dict: Dictionary of arrays to save.
+            output_path: File path for output .h5 file.
+        """
         with h5py.File(output_path, 'w') as f:
             for key, value in data_dict.items():
                 f.create_dataset(key, data=value, compression='gzip')
@@ -397,7 +462,13 @@ class MLDataConverter:
         logger.info(f"Data saved to {output_path}")
     
     def save_numpy(self, data_dict: Dict[str, np.ndarray], output_dir: str):
-        """Save data to numpy format"""
+        """
+        Save jet and constituent data as .npy files per feature.
+
+        Args:
+            data_dict: Dictionary of arrays to save.
+            output_dir: Directory where .npy files will be saved.
+        """
         os.makedirs(output_dir, exist_ok=True)
         
         for key, value in data_dict.items():
@@ -408,7 +479,7 @@ class MLDataConverter:
 
 def main():
     parser = argparse.ArgumentParser(description="Process Delphes ROOT files for jet tagging")
-    parser.add_argument("--input", "-i", required=True, help="Input directory containing Delphes ROOT files")
+    parser.add_argument("--input", "-i", required=True, help="Input Delphes ROOT file or directory")
     parser.add_argument("--output", "-o", required=True, help="Output directory for processed data")
     parser.add_argument("--max-constituents", type=int, default=100, help="Maximum number of constituents per jet")
     parser.add_argument("--format", choices=['hdf5', 'numpy'], default='hdf5', help="Output format")
