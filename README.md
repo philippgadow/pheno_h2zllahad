@@ -142,6 +142,41 @@ source run_simpleanalysis.sh
 As a result, you will find a ROOT file called with the name of the analysis `HZA2018.root`, which contains the histograms.
 
 
+## Neural network training
+
+Before training neural networks, we will prepare the data from the Delphes ROOT files in a more suitable format.
+You can use the `analysis/convert_to_h5.py` script to convert a ROOT file to a h5 file.
+
+```bash
+source setup_conda.sh
+# please replace input with the path to the delphes file and output with the name of the output file which the script will create
+python analysis/convert_to_h5.py --input output/ggH_2HDM/delphes_output_HZA_mA1.00GeV.root --output HZA_mA1.00GeV --max-constituents 20
+python analysis/convert_to_h5.py --input output/Zjets/delphes_output_Zjets.root  --output ZJetsMG5Py8 --max-constituents 20
+```
+
+As a result you will have two h5 files, one for the signal and one for a dominant background process.
+
+You can train the regression neural network with the following command
+
+```bash
+python analysis/train_regression_pytorch.py \
+    --input-h5 HZA_mA1.00GeV/jet_data.h5 \                         
+    --features-dset jet_features \
+    --targets-dset targets \
+    --weights-dset weights \
+    --output-dir output_regression_nn \
+    --batch-size 256 \
+    --epochs 100 \
+    --learning-rate 1e-3 \
+    --hidden-sizes 128 64 32 \
+    --dropout 0.1 \
+    --test-split 0.2 \
+    --val-split 0.2 \
+    --loss huber \
+    --standardize
+```
+
+
 ## Data files on lxplus
 
 Data files have been made accessible on CERN lxplus:
