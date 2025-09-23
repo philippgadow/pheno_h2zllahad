@@ -1,6 +1,6 @@
 #!/bin/bash
 
-MG5_URL="https://launchpad.net/mg5amcnlo/3.0/3.6.x/+download/MG5_aMC_v3.6.2.tar.gz"
+MG5_URL="https://launchpad.net/mg5amcnlo/3.0/3.6.x/+download/MG5_aMC_v3.6.4.tar.gz"
 MG5_TAR=$(basename $MG5_URL)
 MG5_DIR=$(echo $MG5_TAR | sed 's/.tar.gz//; s/\./_/g')
 
