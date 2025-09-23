@@ -42,36 +42,46 @@ fi
 export MAMBA_ROOT_PREFIX=$PWD/micromamba
 export MAMBA_EXE=$PWD/bin/micromamba
 
-# Force micromamba to only use conda-forge
-$MAMBA_EXE config set channel_priority strict
-$MAMBA_EXE config set default_channels []
-$MAMBA_EXE config set channels conda-forge
+# Use a project local condarc that only points to conda forge
+export CONDARC="$PWD/condarc-project.yaml"
+cat > "$CONDARC" <<'YAML'
+channels:
+  - conda-forge
+default_channels: []
+channel_priority: strict
+auto_activate_base: false
+always_yes: true
+YAML
 
-# Initialize shell correctly
-if [ -n "$ZSH_VERSION" ]; then
+# Initialize shell
+if [ -n "${ZSH_VERSION:-}" ]; then
     echo "Initializing micromamba for zsh"
-    eval "$($MAMBA_EXE shell hook --shell zsh)"
-elif [ -n "$BASH_VERSION" ]; then
+    eval "$($MAMBA_EXE --rc-file "$CONDARC" shell hook --shell zsh)"
+elif [ -n "${BASH_VERSION:-}" ]; then
     echo "Initializing micromamba for bash"
-    eval "$($MAMBA_EXE shell hook --shell bash)"
+    eval "$($MAMBA_EXE --rc-file "$CONDARC" shell hook --shell bash)"
 else
     echo "Unsupported shell"
     exit 1
 fi
 
-# Create environment if it doesn't exist
-if ! $MAMBA_EXE env list | grep -q "micromamba_h2zllahad"; then
+ENV_NAME="micromamba_h2zllahad"
+
+# Create environment if it does not exist, force only conda forge
+if ! "$MAMBA_EXE" --rc-file "$CONDARC" env list | grep -q "^$ENV_NAME[[:space:]]"; then
     echo "Creating micromamba environment"
-    $MAMBA_EXE create -y --name micromamba_h2zllahad python=3.9
+    "$MAMBA_EXE" --rc-file "$CONDARC" create -y --name "$ENV_NAME" --override-channels -c conda-forge python=3.9
 fi
 
-# Activate environment properly
-micromamba activate micromamba_h2zllahad
-micromamba install -y conda-forge::subversion conda-forge::fortran-compiler conda-forge::sed conda-forge::libzip conda-forge::cmake
-micromamba install -y conda-forge::root
-micromamba install -y conda-forge::pythia8 conda-forge::hepmc2 conda-forge::hepmc3 conda-forge::lhapdf
-micromamba install -y conda-forge::delphes
-micromamba install -y conda-forge::fastjet
-micromamba install -y conda-forge::pytorch
+# Activate environment + install
+micromamba activate "$ENV_NAME"
+
+micromamba install -y --override-channels -c conda-forge subversion fortran-compiler sed libzip cmake
+micromamba install -y --override-channels -c conda-forge root
+micromamba install -y --override-channels -c conda-forge pythia8 hepmc2 hepmc3 lhapdf
+micromamba install -y --override-channels -c conda-forge delphes
+micromamba install -y --override-channels -c conda-forge fastjet
+micromamba install -y --override-channels -c conda-forge pytorch
+
 pip install -r requirements.txt
 python -m pip install fastjet
