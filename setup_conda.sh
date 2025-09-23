@@ -42,6 +42,11 @@ fi
 export MAMBA_ROOT_PREFIX=$PWD/micromamba
 export MAMBA_EXE=$PWD/bin/micromamba
 
+# Force micromamba to only use conda-forge
+$MAMBA_EXE config set channel_priority strict
+$MAMBA_EXE config set default_channels []
+$MAMBA_EXE config set channels conda-forge
+
 # Initialize shell correctly
 if [ -n "$ZSH_VERSION" ]; then
     echo "Initializing micromamba for zsh"
