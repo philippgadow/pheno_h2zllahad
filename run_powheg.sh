@@ -13,6 +13,6 @@ pushd generators/POWHEG-BOX-V2/gg_H_2HDM
         # Run the POWHEG process
         ./../pwhg_main
         # Move the LHE file to the output directory
-        mv pwgevents.lhe ../../${OUTPUTDIR}/pwgevents.lhe
+        mv pwgevents.lhe ../../../../${OUTPUTDIR}/pwgevents.lhe
     popd
 popd
