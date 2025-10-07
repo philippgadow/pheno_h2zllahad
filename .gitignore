@@ -20,3 +20,6 @@ output/
 *.root
 *.pdf
 *.png
+
+# binary files
+*.o
