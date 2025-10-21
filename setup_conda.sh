@@ -68,7 +68,26 @@ fi
 ENV_NAME="micromamba_h2zllahad"
 
 # Create environment if it does not exist, force only conda forge
-if ! "$MAMBA_EXE" --rc-file "$CONDARC" env list | grep -q "^$ENV_NAME[[:space:]]"; then
+env_exists=1
+if "$MAMBA_EXE" --rc-file "$CONDARC" env list --json > /dev/null 2>&1; then
+    # parse JSON to find environment names (jq is not guaranteed available),
+    # use python -c to parse the JSON safely
+    if "$MAMBA_EXE" --rc-file "$CONDARC" env list --json | \
+       python -c "import sys,json;print(any(e.get('name')==\"$ENV_NAME\" for e in json.load(sys.stdin)))" 2>/dev/null | grep -q True; then
+        env_exists=0
+    else
+        env_exists=1
+    fi
+else
+    # fallback to plain text parsing (escape for zsh-safe character classes)
+    if "$MAMBA_EXE" --rc-file "$CONDARC" env list | grep -q "^$ENV_NAME[[:space:]]"; then
+        env_exists=0
+    else
+        env_exists=1
+    fi
+fi
+
+if [ "$env_exists" -ne 0 ]; then
     echo "Creating micromamba environment"
     "$MAMBA_EXE" --rc-file "$CONDARC" create -y --name "$ENV_NAME" --override-channels -c conda-forge python=3.9
 fi
@@ -76,7 +95,7 @@ fi
 # Activate environment + install
 micromamba activate "$ENV_NAME"
 
-micromamba install -y --override-channels -c conda-forge subversion fortran-compiler sed libzip cmake
+micromamba install -y --override-channels -c conda-forge subversion fortran-compiler sed libzip cmake wget
 micromamba install -y --override-channels -c conda-forge root
 micromamba install -y --override-channels -c conda-forge pythia8 hepmc2 hepmc3 lhapdf
 micromamba install -y --override-channels -c conda-forge delphes
@@ -84,4 +103,3 @@ micromamba install -y --override-channels -c conda-forge fastjet
 micromamba install -y --override-channels -c conda-forge pytorch
 
 pip install -r requirements.txt
-python -m pip install fastjet
