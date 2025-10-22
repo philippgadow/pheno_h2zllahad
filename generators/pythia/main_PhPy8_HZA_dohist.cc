@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <string>
 #include <fstream>
+#include <algorithm>
+#include <cmath>
 
 #include "CmdLine.hh"
 
@@ -217,6 +219,13 @@ int main(int argc, char* argv[]) {
   Hist h_j1mass("hist_j1mass",  40,  0,   20);
   Hist h_z_mass("hist_z_mass",  60, 60,  120);
   Hist h_mlljet("hist_mlljet", 100,  0,  300);
+  Hist h_gtproxy_nTracks("hist_proxy_nTracks",  40,   0,   40);
+  Hist h_gtproxy_deltaRLead("hist_proxy_deltaRLeadTrack", 40, 0.0, 0.4);
+  Hist h_gtproxy_leadPtRatio("hist_proxy_leadTrackPtRatio", 40, 0.0, 1.5);
+  Hist h_gtproxy_angularity2("hist_proxy_angularity_2", 40, 0.0, 0.4);
+  Hist h_gtproxy_U1("hist_proxy_U1_0p7", 40, 0.0, 0.4);
+  Hist h_gtproxy_M2("hist_proxy_M2_0p3", 40, 0.0, 0.4);
+  Hist h_gtproxy_tau2("hist_proxy_tau2", 40, 0.0, 1.0);
 
   for (int iEvent = 0; iEvent < nEvents; ++iEvent) {
 
@@ -225,7 +234,9 @@ int main(int argc, char* argv[]) {
     if (iEvent % 1000 == 0 && iEvent != 0) {
       cout << "Processed " << iEvent << " events" << endl;
       /// Saving hists periodically
-      for (auto h : {h_jet1pt, h_j1mass, h_mlljet, h_lep_pt, h_lem_pt, h_z_mass}) {
+      for (auto h : {h_jet1pt, h_j1mass, h_mlljet, h_lep_pt, h_lem_pt, h_z_mass,
+                     h_gtproxy_nTracks, h_gtproxy_deltaRLead, h_gtproxy_leadPtRatio,
+                     h_gtproxy_angularity2, h_gtproxy_U1, h_gtproxy_M2, h_gtproxy_tau2}) {
 	stringstream ss;
 	ss << "hists_PhPy8_HZA/";
 	ss << h.getTitle();
@@ -481,6 +492,113 @@ int main(int argc, char* argv[]) {
     h_lem_pt.fill(lepM.pT(), wgt);
     h_z_mass.fill(mll, wgt);
 
+    /// ------------------------------------------------------------------
+    /// Ghost-track proxies using charged final-state particles
+    /// ------------------------------------------------------------------
+    const double jetPt  = slowJet.pT(finjet);
+    const double jetEta = slowJet.p(finjet).eta(); 
+    const double jetPhi = slowJet.phi(finjet);
+    const double jetR   = 0.4;
+    const double pi     = std::acos(-1.0);
+    const double twoPi  = 2.0 * pi;
+
+    auto deltaPhi = [pi, twoPi](double phi1, double phi2) {
+      double dphi = phi1 - phi2;
+      while (dphi > pi)  dphi -= twoPi;
+      while (dphi < -pi) dphi += twoPi;
+      return dphi;
+    };
+
+    struct TrackSummary {
+      double pt;
+      double eta;
+      double phi;
+      double deltaR;
+    };
+    std::vector<TrackSummary> jetTracks;
+    double sumTrackPt = 0.0;
+
+    for (int ip = 0; ip < ev.size(); ++ip) {
+      if (!ev[ip].isFinal()) continue;
+      if (!ev[ip].isCharged()) continue;
+      if (ev[ip].status() <= 0) continue; // remove statuses flipped negative
+
+      double trackPt = ev[ip].pT();
+      if (trackPt < 0.5) continue; // avoid extremely soft tracks, track pt cut: > 500 MeV
+      if (abs(ev[ip].eta()) > 2.5) continue; // no tracking outside of tracker: |eta| < 2.5
+      double trackEta = ev[ip].eta();
+      double trackPhi = ev[ip].phi();
+      double dEta = trackEta - jetEta;
+      double dPhi = deltaPhi(trackPhi, jetPhi);
+      double dR   = std::sqrt(dEta * dEta + dPhi * dPhi);
+      if (dR > jetR) continue;
+
+      jetTracks.push_back({trackPt, trackEta, trackPhi, dR});
+      sumTrackPt += trackPt;
+    }
+
+    std::sort(jetTracks.begin(), jetTracks.end(),
+              [](const TrackSummary& a, const TrackSummary& b) { return a.pt > b.pt; });
+
+    const std::size_t nTracks = jetTracks.size();
+    const double leadTrackPt = nTracks > 0 ? jetTracks.front().pt : 0.0;
+    const double leadTrackDR = nTracks > 0 ? jetTracks.front().deltaR : 0.0;
+    const double leadTrackPtRatio = (jetPt > 0.0 && leadTrackPt > 0.0) ? leadTrackPt / jetPt : 0.0;
+
+    double angularity2 = 0.0;
+    if (sumTrackPt > 0.0) {
+      double numer = 0.0;
+      for (const auto& trk : jetTracks) numer += trk.pt * trk.deltaR * trk.deltaR;
+      angularity2 = numer / sumTrackPt;
+    }
+
+    double U1_0p7 = 0.0;
+    if (sumTrackPt > 0.0) {
+      double numer = 0.0;
+      for (const auto& trk : jetTracks) {
+        if (trk.deltaR <= 0.7) numer += trk.pt * trk.deltaR;
+      }
+      U1_0p7 = numer / sumTrackPt;
+    }
+
+    double M2_0p3 = 0.0;
+    {
+      double numer = 0.0;
+      double denom = 0.0;
+      for (const auto& trk : jetTracks) {
+        if (trk.deltaR <= 0.3) {
+          numer += trk.pt * trk.deltaR * trk.deltaR;
+          denom += trk.pt;
+        }
+      }
+      if (denom > 0.0) M2_0p3 = numer / denom;
+    }
+
+    double tau2_proxy = 0.0;
+    if (sumTrackPt > 0.0 && nTracks >= 2) {
+      const auto& axis1 = jetTracks[0];
+      const auto& axis2 = jetTracks[1];
+      double tauNumer = 0.0;
+      for (const auto& trk : jetTracks) {
+        double dEta1 = trk.eta - axis1.eta;
+        double dPhi1 = deltaPhi(trk.phi, axis1.phi);
+        double dEta2 = trk.eta - axis2.eta;
+        double dPhi2 = deltaPhi(trk.phi, axis2.phi);
+        double dR1 = std::sqrt(dEta1 * dEta1 + dPhi1 * dPhi1);
+        double dR2 = std::sqrt(dEta2 * dEta2 + dPhi2 * dPhi2);
+        tauNumer += trk.pt * std::min(dR1, dR2);
+      }
+      tau2_proxy = tauNumer / (sumTrackPt * jetR);
+    }
+
+    h_gtproxy_nTracks.fill(static_cast<double>(nTracks), wgt);
+    h_gtproxy_deltaRLead.fill(leadTrackDR, wgt);
+    h_gtproxy_leadPtRatio.fill(leadTrackPtRatio, wgt);
+    h_gtproxy_angularity2.fill(angularity2, wgt);
+    h_gtproxy_U1.fill(U1_0p7, wgt);
+    h_gtproxy_M2.fill(M2_0p3, wgt);
+    h_gtproxy_tau2.fill(tau2_proxy, wgt);
+
 #ifdef MYDEBUG
     cout << "--------------------------------------------------" << endl;
 #endif
@@ -490,7 +608,9 @@ int main(int argc, char* argv[]) {
   // --- Statistics ---
   pythia.stat();
 
-  for (auto h : {h_jet1pt, h_j1mass, h_mlljet, h_lep_pt, h_lem_pt, h_z_mass}) {
+  for (auto h : {h_jet1pt, h_j1mass, h_mlljet, h_lep_pt, h_lem_pt, h_z_mass,
+                 h_gtproxy_nTracks, h_gtproxy_deltaRLead, h_gtproxy_leadPtRatio,
+                 h_gtproxy_angularity2, h_gtproxy_U1, h_gtproxy_M2, h_gtproxy_tau2}) {
     stringstream ss;
     ss << "hists_PhPy8_HZA/";
     ss << h.getTitle();
