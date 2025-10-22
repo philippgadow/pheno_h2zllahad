@@ -94,12 +94,5 @@ fi
 
 # Activate environment + install
 micromamba activate "$ENV_NAME"
-
-micromamba install -y --override-channels -c conda-forge subversion fortran-compiler sed libzip cmake wget
-micromamba install -y --override-channels -c conda-forge root
-micromamba install -y --override-channels -c conda-forge pythia8 hepmc2 hepmc3 lhapdf
-micromamba install -y --override-channels -c conda-forge delphes
-micromamba install -y --override-channels -c conda-forge fastjet
-micromamba install -y --override-channels -c conda-forge pytorch
-
+micromamba install -y --override-channels -c conda-forge subversion fortran-compiler sed libzip cmake wget root pythia8 hepmc2  hepmc3 lhapdf delphes fastjet pytorch
 pip install -r requirements.txt
