@@ -15,8 +15,8 @@
 using namespace Pythia8;
 using namespace std;
 
-constexpr double pi     = 3.14159265358979323846;
-constexpr double twoPi  = 2.0 * pi;
+constexpr double pi     = M_PI;
+constexpr double twoPi  = 2.0 * M_PI;
 
 /// Pretty printing of Pythia particle
 std::ostream& operator<<(std::ostream& os, const Pythia8::Particle & p) {
