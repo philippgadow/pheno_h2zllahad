@@ -15,6 +15,9 @@
 using namespace Pythia8;
 using namespace std;
 
+constexpr double pi     = 3.14159265358979323846;
+constexpr double twoPi  = 2.0 * pi;
+
 /// Pretty printing of Pythia particle
 std::ostream& operator<<(std::ostream& os, const Pythia8::Particle & p) {
   os << "["
@@ -81,6 +84,14 @@ void printHist(const string & fname, const Pythia8::Hist & hh)
   hh.pyplotTable(outfile, true, false);
   outfile.close();
 }
+
+/// Helper struct for track information
+struct TrackSummary {
+  double pt;
+  double eta;
+  double phi;
+  double deltaR;
+};
 
 
 int main(int argc, char* argv[]) {
@@ -226,6 +237,14 @@ int main(int argc, char* argv[]) {
   Hist h_gtproxy_U1("hist_proxy_U1_0p7", 40, 0.0, 0.4);
   Hist h_gtproxy_M2("hist_proxy_M2_0p3", 40, 0.0, 0.4);
   Hist h_gtproxy_tau2("hist_proxy_tau2", 40, 0.0, 1.0);
+
+  // Helper function for delta phi calculation (used in loop)
+    auto deltaPhi = [](double phi1, double phi2) {
+      double dphi = phi1 - phi2;
+      while (dphi > pi)  dphi -= twoPi;
+      while (dphi < -pi) dphi += twoPi;
+      return dphi;
+    };
 
   for (int iEvent = 0; iEvent < nEvents; ++iEvent) {
 
@@ -499,22 +518,7 @@ int main(int argc, char* argv[]) {
     const double jetEta = slowJet.p(finjet).eta(); 
     const double jetPhi = slowJet.phi(finjet);
     const double jetR   = 0.4;
-    const double pi     = std::acos(-1.0);
-    const double twoPi  = 2.0 * pi;
 
-    auto deltaPhi = [pi, twoPi](double phi1, double phi2) {
-      double dphi = phi1 - phi2;
-      while (dphi > pi)  dphi -= twoPi;
-      while (dphi < -pi) dphi += twoPi;
-      return dphi;
-    };
-
-    struct TrackSummary {
-      double pt;
-      double eta;
-      double phi;
-      double deltaR;
-    };
     std::vector<TrackSummary> jetTracks;
     double sumTrackPt = 0.0;
 
