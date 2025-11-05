@@ -76,3 +76,4 @@ popd
 # install PDF sets with LHAPDF
 lhapdf install NNPDF30_nlo_as_0118
 lhapdf install MSTW2008nlo68cl
+lhapdf install NNPDF23_lo_as_0130_qed
