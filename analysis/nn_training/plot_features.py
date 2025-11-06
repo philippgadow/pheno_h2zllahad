@@ -1,728 +1,518 @@
 #!/usr/bin/env python3
-"""
-Plot ghost track variables split by truth mass categories.
-
-This script creates HEP style visualizations using mplhep with proper histograms.
-Example:
-    python plot_features.py \
-      --input-h5 signal_a05.h5 signal_a10.h5 signal_a15.h5 \
-      --output-dir plots/features \
-      --create-pdf
-"""
+"""Visualise input features with explicit signal/background separation."""
 
 import os
-import re
 import argparse
+from typing import Dict, List, Tuple, Optional
+
 import h5py
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mplhep as hep
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.colors import LogNorm
 
-# Use ROOT style
+
+# HEP plot styling
 plt.style.use(hep.style.CMS)
 
-# =============================================================================
-# Utilities
-# =============================================================================
+AUX_SENTINEL = -999999.0
+COLOR_BACKGROUND = "#4c72b0"
+COLOR_SIGNAL = "#dd8452"
+
 
 def safe_name(s: str) -> str:
-    """Return a filesystem safe slug for titles or feature names."""
-    s = re.sub(r"\s+", "_", s.strip())
-    s = re.sub(r"[^\w\-\.\+]", "", s)
-    return s[:120]  # keep filenames reasonable
+    """Return a filesystem friendly slug."""
+    return "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in s).strip("_")
 
-# =============================================================================
-# Data Loading
-# =============================================================================
 
-def load_h5_file(h5_path, features_key="ghost_track_vars", targets_key="targets"):
-    """Load features and targets from a single HDF5 file."""
+def _decode_bytes_array(arr: Optional[np.ndarray]) -> Optional[List[str]]:
+    if arr is None:
+        return None
+    out: List[str] = []
+    for item in arr:
+        if isinstance(item, (bytes, np.bytes_)):
+            out.append(item.decode("utf-8", errors="ignore"))
+        else:
+            out.append(str(item))
+    return out
+
+
+def load_h5_file(
+    h5_path: str,
+    features_key: str = "ghost_track_vars",
+    targets_key: str = "targets",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[int, Dict[str, object]]]:
+    """Load features, regression targets, and classification labels from a single HDF5 file."""
     with h5py.File(h5_path, "r") as f:
-        if features_key not in f:
-            raise KeyError(f"{h5_path} missing '{features_key}' dataset")
-        if targets_key not in f:
-            raise KeyError(f"{h5_path} missing '{targets_key}' dataset")
+        if features_key not in f or targets_key not in f:
+            raise KeyError(f"{h5_path} missing required datasets '{features_key}' or '{targets_key}'")
 
-        X = f[features_key][:]
-        y = f[targets_key][:]
+        X = f[features_key][:].astype(np.float32)
+        y = np.squeeze(f[targets_key][:]).astype(np.float32)
+        if y.ndim != 1:
+            raise ValueError(f"{h5_path}: '{targets_key}' must be 1D, got shape {y.shape}")
 
-    y = np.squeeze(y)
-    if y.ndim != 1:
-        raise ValueError(f"{h5_path} targets must be 1D, got shape {y.shape}")
+        if "is_signal" not in f or "signal_class" not in f:
+            raise KeyError(f"{h5_path} missing 'is_signal' or 'signal_class' datasets")
 
-    return X.astype(np.float32), y.astype(np.float32)
+        is_signal = f["is_signal"][:].astype(np.int8)
+        signal_class = f["signal_class"][:].astype(np.int64)
+        if is_signal.shape != (len(y),) or signal_class.shape != (len(y),):
+            raise ValueError(f"{h5_path}: label arrays must match targets length {len(y)}")
+
+        class_entries: Dict[int, Dict[str, object]] = {}
+        if "signal_class_ids" in f:
+            ids = f["signal_class_ids"][:].astype(np.int64)
+            names = _decode_bytes_array(f.get("signal_class_names"))
+            keys = _decode_bytes_array(f.get("signal_class_keys"))
+            pids = f.get("signal_class_truth_pid")
+            masses = f.get("signal_class_mass_GeV")
+            sources = _decode_bytes_array(f.get("signal_class_source_file"))
+
+            for idx, cid in enumerate(ids):
+                entry = {
+                    "id": int(cid),
+                    "name": names[idx] if names and idx < len(names) else f"signal_{int(cid)}",
+                    "key": keys[idx] if keys and idx < len(keys) else "",
+                    "pid": int(pids[idx]) if pids is not None else -1,
+                    "mass": float(masses[idx]) if masses is not None else float("nan"),
+                    "source": sources[idx] if sources and idx < len(sources) else "",
+                }
+                class_entries[int(cid)] = entry
+
+    return X, y, is_signal, signal_class, class_entries
 
 
-def load_h5_multi(paths, features_key="ghost_track_vars", targets_key="targets"):
-    """Load and concatenate data from multiple HDF5 files."""
-    Xs, ys = [], []
+def load_h5_multi(
+    paths: List[str],
+    features_key: str = "ghost_track_vars",
+    targets_key: str = "targets",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+    """Load and concatenate multiple HDF5 files, ensuring consistent metadata."""
+    Xs: List[np.ndarray] = []
+    ys: List[np.ndarray] = []
+    sigs: List[np.ndarray] = []
+    classes: List[np.ndarray] = []
+    class_meta_union: Dict[int, Dict[str, object]] = {}
+
     for p in paths:
-        X, y = load_h5_file(p, features_key, targets_key)
+        X, y, is_signal, signal_class, info = load_h5_file(p, features_key, targets_key)
+        print(f"Loaded {len(y):6d} rows from {os.path.basename(p)}")
         Xs.append(X)
         ys.append(y)
-        print(f"Loaded {len(y)} rows from {os.path.basename(p)}")
+        sigs.append(is_signal)
+        classes.append(signal_class)
+        if info:
+            for cid, entry in info.items():
+                if cid not in class_meta_union:
+                    class_meta_union[cid] = entry
+                else:
+                    existing = class_meta_union[cid]
+                    # ensure consistency for duplicate ids
+                    for key in ("name", "key", "pid", "mass", "source"):
+                        if key in entry and key in existing:
+                            if existing[key] != entry[key]:
+                                print(f"Warning: class id {cid} has conflicting {key} between files; keeping first")
 
-    X = np.concatenate(Xs, axis=0)
-    y = np.concatenate(ys, axis=0)
+    X_all = np.concatenate(Xs, axis=0)
+    y_all = np.concatenate(ys, axis=0)
+    sig_all = np.concatenate(sigs, axis=0)
+    cls_all = np.concatenate(classes, axis=0)
 
-    print(f"Total rows: {len(y)}")
+    # Filter out rows with completely invalid features or targets
+    finite_mask = np.isfinite(y_all) | (sig_all == 0)
+    finite_mask &= np.all(np.isfinite(X_all), axis=1)
+    n_filtered = int((~finite_mask).sum())
+    if n_filtered > 0:
+        print(f"Filtering {n_filtered} jets with non-finite values")
+        X_all = X_all[finite_mask]
+        y_all = y_all[finite_mask]
+        sig_all = sig_all[finite_mask]
+        cls_all = cls_all[finite_mask]
 
-    # Filter non finite rows
-    mask = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
-    n_dropped = int((~mask).sum())
-    if n_dropped > 0:
-        print(f"Filtering {n_dropped} rows with non finite values")
-        X = X[mask]
-        y = y[mask]
-        print(f"Total rows after filtering: {len(y)}")
-
-    return X, y
-
-# =============================================================================
-# Mass Categories
-# =============================================================================
-
-def categorize_by_mass(masses):
-    """
-    Categorize jets by truth mass.
-
-    0: < 1 GeV
-    1: 1 to 2 GeV
-    2: 2 to 3 GeV
-    3: 3 to 4 GeV
-    4: 4 to 100 GeV
-    5: >= 100 GeV
-    """
-    categories = np.zeros(len(masses), dtype=int)
-    categories[masses < 1.0] = 0
-    categories[(masses >= 1.0) & (masses < 2.0)] = 1
-    categories[(masses >= 2.0) & (masses < 3.0)] = 2
-    categories[(masses >= 3.0) & (masses < 4.0)] = 3
-    categories[(masses >= 4.0) & (masses < 100.0)] = 4
-    categories[masses >= 100.0] = 5
-    return categories
+    return X_all, y_all, sig_all, cls_all, class_meta_union
 
 
-def get_category_names(tex=True):
-    """Return names for each mass category."""
-    if tex:
-        return [
-            r"$m<1$ GeV",
-            r"$1\leq m<2$ GeV",
-            r"$2\leq m<3$ GeV",
-            r"$3\leq m<4$ GeV",
-            r"$4\leq m<100$ GeV",
-            r"$m\geq 100$ GeV",
-        ]
-    return ["< 1 GeV", "1 to 2 GeV", "2 to 3 GeV", "3 to 4 GeV", "4 to 100 GeV", ">= 100 GeV"]
+def _compute_bins(
+    arrays: List[np.ndarray],
+    nbins: int = 60,
+    feature_name: Optional[str] = None
+) -> Optional[Tuple[Tuple[float, float], np.ndarray]]:
+    vals = []
+    for a in arrays:
+        if a.size == 0:
+            continue
+        finite = np.isfinite(a)
+        if np.any(finite):
+            filtered = a[finite]
+            filtered = filtered[filtered != AUX_SENTINEL]
+            filtered = filtered[~np.isclose(filtered, -1.0)]
+            if filtered.size > 0:
+                vals.append(filtered)
+    if not vals:
+        return None
+    combined = np.concatenate(vals)
+    if combined.size == 0:
+        return None
 
+    if feature_name == "nTracks":
+        lo, hi = 0.0, 20.0
+        bins = np.linspace(lo, hi, 21)
+        return (lo, hi), bins
 
-def get_category_colors():
-    """Return colors for each mass category."""
-    # A readable, colorblind friendly palette
-    return ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#a65628']
+    if feature_name == "angularity_2":
+        lo, hi = 0.0, 50.0
+        bins = np.linspace(lo, hi, 26)
+        return (lo, hi), bins
 
-# =============================================================================
-# Plotting
-# =============================================================================
-
-# def _range_and_bins(arr, qlow=0.5, qhigh=99.5, nbins=50):
-#     valid = np.isfinite(arr)
-#     if not np.any(valid):
-#         return None, None, valid
-#     p1, p99 = np.percentile(arr[valid], [qlow, qhigh])
-#     w = p99 - p1
-#     lo, hi = p1 - 0.05 * w, p99 + 0.05 * w
-#     bins = np.linspace(lo, hi, nbins + 1)
-#     return (lo, hi), bins, valid
-
-def _range_and_bins(arr, qlow=0.5, qhigh=99.5, nbins=50):
-    # keep only finite and strictly positive entries
-    valid = np.isfinite(arr) & (arr > 0)
-    if not np.any(valid):
-        return None, None, valid
-    p1, p99 = np.percentile(arr[valid], [qlow, qhigh])
-    w = p99 - p1
-    lo, hi = p1 - 0.05 * w, p99 + 0.05 * w
-    # clamp the lower edge to be strictly positive
-    lo = max(lo, np.nextafter(0.0, 1.0))
+    lo_q, hi_q = np.percentile(combined, [0.5, 99.5])
+    if not np.isfinite(lo_q) or not np.isfinite(hi_q) or hi_q <= lo_q:
+        return None
+    span = hi_q - lo_q
+    lo = lo_q - 0.05 * span
+    hi = hi_q + 0.05 * span
     bins = np.linspace(lo, hi, nbins + 1)
-    return (lo, hi), bins, valid
+    return (lo, hi), bins
 
 
-
-# def plot_feature_distributions(X, masses, feature_names, save_dir):
-#     """One figure per feature with category split step histograms."""
-#     os.makedirs(save_dir, exist_ok=True)
-#     categories = categorize_by_mass(masses)
-#     cat_names = get_category_names()
-#     colors = get_category_colors()
-
-#     for i, feat_name in enumerate(feature_names):
-#         fig, ax = plt.subplots(figsize=(10, 8))
-#         feat = X[:, i]
-#         rng, bins, valid = _range_and_bins(feat, 0.5, 99.5, 50)
-
-#         if rng is None:
-#             plt.close(fig)
-#             continue
-
-#         for cat_idx in range(6):
-#             mask = (categories == cat_idx) & valid
-#             n = int(mask.sum())
-#             if n == 0:
-#                 continue
-#             hist, edges = np.histogram(feat[mask], bins=bins)
-#             hep.histplot((hist, edges),
-#                          label=f"{cat_names[cat_idx]} (n={n})",
-#                          color=colors[cat_idx],
-#                          histtype='step',
-#                          linewidth=2,
-#                          ax=ax)
-
-#         ax.set_xlabel(feat_name, fontsize=14)
-#         ax.set_ylabel('Jets', fontsize=14)
-#         ax.set_xlim(rng)
-#         ax.legend(loc='best', fontsize=11, frameon=True)
-#         plt.tight_layout()
-#         out = os.path.join(save_dir, f"feature_{i:02d}_{safe_name(feat_name)}.png")
-#         fig.savefig(out, dpi=150)
-#         plt.close(fig)
-#         print(f"  Saved: {os.path.basename(out)}")
-
-def plot_feature_distributions(X, masses, feature_names, save_dir):
-    os.makedirs(save_dir, exist_ok=True)
-    categories = categorize_by_mass(masses)
-    cat_names = get_category_names()
-    colors = get_category_colors()
-
-    for i, feat_name in enumerate(feature_names):
-        fig, ax = plt.subplots(figsize=(10, 8))
-        feat = X[:, i]
-        rng, bins, valid = _range_and_bins(feat, 0.5, 99.5, 50)
-        if rng is None:
-            plt.close(fig)
-            continue
-
-        for cat_idx in range(6):
-            mask = (categories == cat_idx) & valid
-            n = int(mask.sum())
-            if n == 0:
-                continue
-            hist, edges = np.histogram(feat[mask], bins=bins)
-            hep.histplot((hist, edges),
-                         label=f"{cat_names[cat_idx]} (n={n})",
-                         color=colors[cat_idx],
-                         histtype='step',
-                         linewidth=2,
-                         ax=ax)
-
-        ax.set_xlabel(feat_name, fontsize=14)
-        ax.set_ylabel('Jets', fontsize=14)
-        ax.set_xlim(rng)
-        ax.legend(loc='best', fontsize=11, frameon=True)
-        plt.tight_layout()
-        out = os.path.join(save_dir, f"feature_{i:02d}_{safe_name(feat_name)}.png")
-        fig.savefig(out, dpi=150)
-        plt.close(fig)
-        print(f"  Saved: {os.path.basename(out)}")
+def _build_class_labels(meta: Dict[int, Dict[str, object]]) -> Dict[int, Dict[str, object]]:
+    if not meta:
+        return {}
+    labels: Dict[int, Dict[str, object]] = {}
+    for cid, entry in meta.items():
+        labels[cid] = {
+            "id": cid,
+            "name": entry.get("name", f"signal_{cid}"),
+            "pid": entry.get("pid", -1),
+            "mass": entry.get("mass", float("nan")),
+            "source": entry.get("source", ""),
+            "key": entry.get("key", ""),
+        }
+    return labels
 
 
-# def plot_feature_distributions_grid(X, masses, feature_names, save_path):
-#     """All features in a single grid."""
-#     categories = categorize_by_mass(masses)
-#     cat_names = get_category_names()
-#     colors = get_category_colors()
+def plot_signal_breakdown(
+    is_signal: np.ndarray,
+    signal_class: np.ndarray,
+    class_labels: Dict[int, Dict[str, object]],
+    save_path: str,
+):
+    background = int((is_signal == 0).sum())
+    unique_classes = sorted(cid for cid in np.unique(signal_class) if cid != -1)
+    counts = [int((signal_class == cid).sum()) for cid in unique_classes]
+    labels = [class_labels.get(cid, {}).get("name", f"signal {cid}") for cid in unique_classes]
 
-#     n_features = X.shape[1]
-#     n_cols = 3
-#     n_rows = int(np.ceil(n_features / n_cols))
+    fig, ax = plt.subplots(figsize=(max(8, 1.5 * len(labels)), 6))
+    bars = ax.bar(["background"], [background], color=COLOR_BACKGROUND, alpha=0.85, edgecolor="black")
+    for bar in bars:
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{background:,}",
+                ha="center", va="bottom", fontsize=10, weight="bold")
 
-#     fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 5 * n_rows))
-#     axes = axes.flatten() if n_features > 1 else [axes]
+    x_positions = np.arange(len(labels)) + 1
+    palette = plt.cm.tab20(np.linspace(0, 1, max(3, len(labels))))
+    for idx, (cid, count, name) in enumerate(zip(unique_classes, counts, labels)):
+        bar = ax.bar([idx + 1], [count], color=palette[idx], alpha=0.9, edgecolor="black")
+        ax.text(bar.patches[0].get_x() + bar.patches[0].get_width() / 2,
+                bar.patches[0].get_height(), f"{count:,}\n({count/(count+background):.2%})",
+                ha="center", va="bottom", fontsize=9)
 
-#     for i, feat_name in enumerate(feature_names):
-#         ax = axes[i]
-#         feat = X[:, i]
-#         rng, bins, valid = _range_and_bins(feat, 0.5, 99.5, 40)
-#         if rng is None:
-#             ax.axis('off')
-#             continue
-
-#         for cat_idx in range(6):
-#             mask = (categories == cat_idx) & valid
-#             if not np.any(mask):
-#                 continue
-#             hist, edges = np.histogram(feat[mask], bins=bins)
-#             hep.histplot((hist, edges),
-#                          label=f"{cat_names[cat_idx]}",
-#                          color=colors[cat_idx],
-#                          histtype='step',
-#                          linewidth=2,
-#                          ax=ax)
-
-#         ax.set_xlabel(feat_name, fontsize=10)
-#         ax.set_ylabel('Jets', fontsize=10)
-#         ax.set_xlim(rng)
-#         if i == 0:
-#             ax.legend(loc='best', fontsize=8, frameon=True)
-
-#     for j in range(i + 1, len(axes)):
-#         axes[j].axis('off')
-
-#     plt.suptitle('Ghost track variables by mass category', fontsize=16, y=0.995)
-#     plt.tight_layout()
-#     fig.savefig(save_path, dpi=150, bbox_inches='tight')
-#     plt.close(fig)
-#     print(f"  Saved: {os.path.basename(save_path)}")
-
-def plot_feature_distributions_grid(X, masses, feature_names, save_path):
-    categories = categorize_by_mass(masses)
-    cat_names = get_category_names()
-    colors = get_category_colors()
-
-    n_features = X.shape[1]
-    n_cols = 3
-    n_rows = int(np.ceil(n_features / n_cols))
-
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 5 * n_rows))
-    axes = axes.flatten() if n_features > 1 else [axes]
-
-    for i, feat_name in enumerate(feature_names):
-        ax = axes[i]
-        feat = X[:, i]
-        rng, bins, valid = _range_and_bins(feat, 0.5, 99.5, 40)
-        if rng is None:
-            ax.axis('off')
-            continue
-
-        for cat_idx in range(6):
-            mask = (categories == cat_idx) & valid
-            if not np.any(mask):
-                continue
-            hist, edges = np.histogram(feat[mask], bins=bins)
-            hep.histplot((hist, edges),
-                         label=f"{cat_names[cat_idx]}",
-                         color=colors[cat_idx],
-                         histtype='step',
-                         linewidth=2,
-                         ax=ax)
-
-        ax.set_xlabel(feat_name, fontsize=10)
-        ax.set_ylabel('Jets', fontsize=10)
-        ax.set_xlim(rng)
-        if i == 0:
-            ax.legend(loc='best', fontsize=8, frameon=True)
-
-    for j in range(i + 1, len(axes)):
-        axes[j].axis('off')
-
-    plt.suptitle('Ghost track variables by mass category', fontsize=16, y=0.995)
+    ax.set_xticks([0] + list(x_positions))
+    ax.set_xticklabels(["background"] + labels, rotation=20, ha="right")
+    ax.set_ylabel("Jets")
+    ax.set_title("Jet counts by class")
+    ax.set_ylim(0, max([background] + counts) * 1.2 if counts else background * 1.2)
     plt.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    fig.savefig(save_path, dpi=150)
     plt.close(fig)
     print(f"  Saved: {os.path.basename(save_path)}")
 
 
-# def plot_feature_vs_mass(X, masses, feature_names, save_dir):
-#     """2D hist per feature vs truth mass."""
-#     os.makedirs(save_dir, exist_ok=True)
-#     for i, feat_name in enumerate(feature_names):
-#         fig, ax = plt.subplots(figsize=(10, 8))
-#         feat = X[:, i]
-#         valid = np.isfinite(feat) & np.isfinite(masses)
-#         if not np.any(valid):
-#             plt.close(fig)
-#             continue
+def plot_feature_distributions_signal_background(
+    X: np.ndarray,
+    is_signal: np.ndarray,
+    signal_class: np.ndarray,
+    class_labels: Dict[int, Dict[str, object]],
+    feature_names: List[str],
+    output_dir: str,
+    min_count: int = 0,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    signal_mask = is_signal == 1
+    background_mask = is_signal == 0
 
-#         feat_valid = feat[valid]
-#         mass_valid = masses[valid]
+    if not np.any(signal_mask) or not np.any(background_mask):
+        print("  Skipping signal/background overlays (missing categories)")
+        return
 
-#         f1, f99 = np.percentile(feat_valid, [0.5, 99.5])
-#         m1, m99 = np.percentile(mass_valid, [0.5, 99.5])
+    class_ids = sorted(cid for cid in np.unique(signal_class) if cid != -1)
+    if not class_ids:
+        print("  No signal classes found for signal/background overlays")
+        return
 
-#         h = ax.hist2d(mass_valid, feat_valid,
-#                       bins=[80, 80],
-#                       range=[[m1, m99], [f1, f99]],
-#                       cmap='viridis',
-#                       norm=LogNorm(),
-#                       cmin=1)
+    sig = X[signal_mask]
+    bkg = X[background_mask]
+    palette = plt.cm.tab20(np.linspace(0, 1, max(len(class_ids), 3)))
 
-#         cbar = plt.colorbar(h[3], ax=ax)
-#         cbar.set_label('Jets', fontsize=12)
-
-#         ax.set_xlabel('Truth mass [GeV]', fontsize=14)
-#         ax.set_ylabel(feat_name, fontsize=14)
-
-#         for boundary in [1, 2, 3, 4, 100]:
-#             if m1 < boundary < m99:
-#                 ax.axvline(boundary, color='red', linestyle='--', linewidth=1.2, alpha=0.7)
-
-#         plt.tight_layout()
-#         out = os.path.join(save_dir, f"feature_vs_mass_{i:02d}_{safe_name(feat_name)}.png")
-#         fig.savefig(out, dpi=150)
-#         plt.close(fig)
-#         print(f"  Saved: {os.path.basename(out)}")
-
-from matplotlib.colors import LogNorm  # keep this import
-
-def plot_feature_vs_mass(X, masses, feature_names, save_dir):
-    os.makedirs(save_dir, exist_ok=True)
-    for i, feat_name in enumerate(feature_names):
-        fig, ax = plt.subplots(figsize=(10, 8))
-        feat = X[:, i]
-        # require positive feature and positive mass
-        valid = np.isfinite(feat) & np.isfinite(masses) & (feat > 0) & (masses > 0)
-        if not np.any(valid):
-            plt.close(fig)
+    for idx, name in enumerate(feature_names):
+        bkg_feat = bkg[:, idx]
+        class_values = [X[signal_class == cid, idx] for cid in class_ids]
+        bins_info = _compute_bins([bkg_feat] + class_values, feature_name=name)
+        if bins_info is None:
             continue
+        (lo, hi), bins = bins_info
 
-        feat_valid = feat[valid]
-        mass_valid = masses[valid]
+        fig, ax = plt.subplots(figsize=(10, 7))
+        bkg_finite = bkg_feat[np.isfinite(bkg_feat)]
+        h_bkg, edges = np.histogram(bkg_finite, bins=bins)
+        if h_bkg.sum() > 0:
+            h_bkg = h_bkg / h_bkg.sum()
+        hep.histplot((h_bkg, edges), histtype="fill", color=COLOR_BACKGROUND,
+                     alpha=0.5, label=f"background (n={bkg_finite.size:,})", ax=ax)
 
-        f1, f99 = np.percentile(feat_valid, [0.5, 99.5])
-        m1, m99 = np.percentile(mass_valid, [0.5, 99.5])
-        # clamp to positive
-        f1 = max(f1, np.nextafter(0.0, 1.0))
-        m1 = max(m1, np.nextafter(0.0, 1.0))
+        for color, cid in zip(palette, class_ids):
+            mask = (signal_class == cid)
+            values = X[mask, idx]
+            finite = values[np.isfinite(values)]
+            if finite.size <= min_count:
+                continue
+            label = class_labels.get(cid, {}).get("name", f"class {cid}")
+            label = label.split(" (PID")[0]
+            h_sig, _ = np.histogram(finite, bins=bins)
+            if h_sig.sum() > 0:
+                h_sig = h_sig / h_sig.sum()
+            hep.histplot((h_sig, edges), histtype="step", linewidth=2.0, color=tuple(color),
+                         label=f"{label} (n={finite.size:,})", ax=ax)
 
-        h = ax.hist2d(mass_valid, feat_valid,
-                      bins=[80, 80],
-                      range=[[m1, m99], [f1, f99]],
-                      cmap='viridis',
-                      norm=LogNorm(),
-                      cmin=1)
-
-        cbar = plt.colorbar(h[3], ax=ax)
-        cbar.set_label('Jets', fontsize=12)
-
-        ax.set_xlabel('Truth mass [GeV]', fontsize=14)
-        ax.set_ylabel(feat_name, fontsize=14)
-
-        for boundary in [1, 2, 3, 4, 100]:
-            if m1 < boundary < m99:
-                ax.axvline(boundary, color='red', linestyle='--', linewidth=1.2, alpha=0.7)
-
+        ax.set_xlabel(name)
+        ax.set_ylabel("Normalized jets")
+        ax.set_xlim(lo, hi)
+        ax.legend(frameon=True)
+        ax.set_title(f"{name}: signal vs background")
         plt.tight_layout()
-        out = os.path.join(save_dir, f"feature_vs_mass_{i:02d}_{safe_name(feat_name)}.png")
+        out = os.path.join(output_dir, f"feature_sb_{idx:02d}_{safe_name(name)}.png")
         fig.savefig(out, dpi=150)
         plt.close(fig)
         print(f"  Saved: {os.path.basename(out)}")
 
 
-def plot_correlation_matrices(X, masses, feature_names, save_dir):
-    """Correlation matrices per mass category."""
-    categories = categorize_by_mass(masses)
-    cat_names = get_category_names(tex=False)
+def plot_feature_distributions_by_class(
+    X: np.ndarray,
+    is_signal: np.ndarray,
+    signal_class: np.ndarray,
+    class_labels: Dict[int, Dict[str, object]],
+    feature_names: List[str],
+    output_dir: str,
+    min_count: int = 50,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    class_ids = sorted(cid for cid in np.unique(signal_class) if cid != -1)
+    if not class_ids:
+        print("  No signal classes found for per-class plots")
+        return
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    axes = axes.flatten()
+    background_mask = is_signal == 0
+    bkg = X[background_mask]
+    palette = plt.cm.tab20(np.linspace(0, 1, max(len(class_ids), 3)))
 
-    short_names = [fn.replace('GhostTrackVars_', '').replace('_', ' ') for fn in feature_names]
+    for idx, name in enumerate(feature_names):
+        feat_bkg = bkg[:, idx]
+        bins_info = _compute_bins([feat_bkg] + [X[signal_class == cid, idx] for cid in class_ids], feature_name=name)
+        if bins_info is None:
+            continue
+        (lo, hi), bins = bins_info
 
-    for cat_idx in range(6):
-        ax = axes[cat_idx]
-        mask = categories == cat_idx
-        n = int(mask.sum())
+        fig, ax = plt.subplots(figsize=(10, 7))
+        bkg_finite = feat_bkg[np.isfinite(feat_bkg)]
+        h_bkg, edges = np.histogram(bkg_finite, bins=bins)
+        if h_bkg.sum() > 0:
+            h_bkg = h_bkg / h_bkg.sum()
+        hep.histplot((h_bkg, edges), histtype="fill", color=COLOR_BACKGROUND,
+                     alpha=0.35, label=f"background (n={bkg_finite.size:,})", ax=ax)
 
-        if n > 10:
-            X_cat = X[mask]
-            corr = np.corrcoef(X_cat.T)
-            im = ax.imshow(corr, cmap='RdBu_r', vmin=-1, vmax=1, aspect='auto')
-            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            cbar.set_label('Correlation', fontsize=10)
+        for color, cid in zip(palette, class_ids):
+            mask = (signal_class == cid)
+            values = X[mask, idx]
+            finite = values[np.isfinite(values)]
+            if finite.size < min_count:
+                continue
+            label = class_labels.get(cid, {}).get("name", f"class {cid}")
+            label = label.split(" (PID")[0]
+            h_sig, _ = np.histogram(finite, bins=bins)
+            if h_sig.sum() > 0:
+                h_sig = h_sig / h_sig.sum()
+            hep.histplot((h_sig, edges), histtype="step", linewidth=2, color=tuple(color),
+                         label=f"{label} (n={finite.size:,})", ax=ax)
 
-            ax.set_xticks(range(len(short_names)))
-            ax.set_yticks(range(len(short_names)))
-            ax.set_xticklabels(short_names, fontsize=8, rotation=45, ha='right')
-            ax.set_yticklabels(short_names, fontsize=8)
-            ax.set_title(f"{cat_names[cat_idx]} (n={n})", fontsize=12)
+        ax.set_xlabel(name)
+        ax.set_ylabel("Normalized jets")
+        ax.set_xlim(lo, hi)
+        ax.legend(frameon=True, fontsize=10)
+        ax.set_title(f"{name}: per-signal-class")
+        plt.tight_layout()
+        out = os.path.join(output_dir, f"feature_classes_{idx:02d}_{safe_name(name)}.png")
+        fig.savefig(out, dpi=150)
+        plt.close(fig)
+        print(f"  Saved: {os.path.basename(out)}")
 
-        else:
-            ax.text(0.5, 0.5, f"Not enough data\n(n={n})",
-                    ha='center', va='center', transform=ax.transAxes, fontsize=12)
-            ax.axis('off')
 
-    plt.suptitle('Feature correlations by mass category', fontsize=16)
+def plot_signal_mass_distributions(
+    masses: np.ndarray,
+    signal_class: np.ndarray,
+    class_labels: Dict[int, Dict[str, object]],
+    output_dir: str,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    class_ids = sorted(cid for cid in np.unique(signal_class) if cid != -1)
+    if not class_ids:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    palette = plt.cm.tab20(np.linspace(0, 1, max(len(class_ids), 3)))
+
+    for color, cid in zip(palette, class_ids):
+        mask = (signal_class == cid)
+        finite = masses[mask]
+        finite = finite[np.isfinite(finite)]
+        if finite.size < 5:
+            continue
+        lo = float(np.min(finite))
+        hi = float(np.max(finite))
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            continue
+        if hi <= lo:
+            width = max(abs(lo) * 0.05, 0.1)
+            lo = max(0.0, lo - width / 2.0)
+            hi = lo + width
+        bins = np.linspace(lo, hi, 41)
+        hist, edges = np.histogram(finite, bins=bins)
+        label = class_labels.get(cid, {}).get("name", f"class {cid}")
+        label = label.split(" (PID")[0]
+        hep.histplot((hist, edges), histtype="step", linewidth=2, color=tuple(color),
+                     label=f"{label} (n={finite.size:,})", ax=ax)
+
+    ax.set_xlabel("Truth mass [GeV]")
+    ax.set_ylabel("Jets")
+    ax.legend(frameon=True)
+    ax.set_title("Signal truth mass per class")
     plt.tight_layout()
-    out = os.path.join(save_dir, "correlation_matrices.png")
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    out = os.path.join(output_dir, "signal_mass_by_class.png")
+    fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"  Saved: {os.path.basename(out)}")
 
 
-# def plot_mass_distribution(masses, save_path):
-#     """Distribution of truth masses, linear and log count axes."""
-#     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-#     valid = np.isfinite(masses)
-#     masses_valid = masses[valid]
-#     if masses_valid.size == 0:
-#         plt.close(fig)
-#         return
-
-#     p1, p99 = np.percentile(masses_valid, [0.1, 99.9])
-#     bins = np.linspace(p1, p99, 81)
-
-#     # Linear
-#     hist, edges = np.histogram(masses_valid, bins=bins)
-#     hep.histplot((hist, edges), histtype='fill', color='steelblue', alpha=0.7, edgecolor='black', linewidth=1.0, ax=ax1)
-#     ax1.set_xlabel('Truth mass [GeV]', fontsize=12)
-#     ax1.set_ylabel('Jets', fontsize=12)
-#     for b in [1, 2, 3, 4, 100]:
-#         if p1 < b < p99:
-#             ax1.axvline(b, color='red', linestyle='--', linewidth=1.2, alpha=0.8)
-
-#     stats = f"Total: {len(masses_valid):,}\nMean: {np.mean(masses_valid):.2f} GeV\nMedian: {np.median(masses_valid):.2f} GeV\nStd: {np.std(masses_valid):.2f} GeV"
-#     ax1.text(0.98, 0.97, stats, transform=ax1.transAxes, va='top', ha='right',
-#              bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='black'),
-#              fontsize=10, family='monospace')
-
-#     # Log
-#     hep.histplot((hist, edges), histtype='fill', color='steelblue', alpha=0.7, edgecolor='black', linewidth=1.0, ax=ax2)
-#     ax2.set_xlabel('Truth mass [GeV]', fontsize=12)
-#     ax2.set_ylabel('Jets', fontsize=12)
-#     ax2.set_yscale('log')
-#     for b in [1, 2, 3, 4, 100]:
-#         if p1 < b < p99:
-#             ax2.axvline(b, color='red', linestyle='--', linewidth=1.2, alpha=0.8)
-
-#     plt.tight_layout()
-#     fig.savefig(save_path, dpi=150)
-#     plt.close(fig)
-#     print(f"  Saved: {os.path.basename(save_path)}")
-
-def plot_mass_distribution(masses, save_path):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-    valid = np.isfinite(masses) & (masses > 0)
-    masses_valid = masses[valid]
-    if masses_valid.size == 0:
-        plt.close(fig)
-        return
-
-    p1, p99 = np.percentile(masses_valid, [0.1, 99.9])
-    p1 = max(p1, np.nextafter(0.0, 1.0))
-    bins = np.linspace(p1, p99, 81)
-
-    hist, edges = np.histogram(masses_valid, bins=bins)
-    hep.histplot((hist, edges), histtype='fill', color='steelblue', alpha=0.7,
-                 edgecolor='black', linewidth=1.0, ax=ax1)
-    ax1.set_xlabel('Truth mass [GeV]', fontsize=12)
-    ax1.set_ylabel('Jets', fontsize=12)
-    for b in [1, 2, 3, 4, 100]:
-        if p1 < b < p99:
-            ax1.axvline(b, color='red', linestyle='--', linewidth=1.2, alpha=0.8)
-
-    stats = (
-        f"Total: {len(masses_valid):,}\n"
-        f"Mean: {np.mean(masses_valid):.2f} GeV\n"
-        f"Median: {np.median(masses_valid):.2f} GeV\n"
-        f"Std: {np.std(masses_valid):.2f} GeV"
-    )
-    ax1.text(0.98, 0.97, stats, transform=ax1.transAxes, va='top', ha='right',
-             bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='black'),
-             fontsize=10, family='monospace')
-
-    hep.histplot((hist, edges), histtype='fill', color='steelblue', alpha=0.7,
-                 edgecolor='black', linewidth=1.0, ax=ax2)
-    ax2.set_xlabel('Truth mass [GeV]', fontsize=12)
-    ax2.set_ylabel('Jets', fontsize=12)
-    ax2.set_yscale('log')
-    for b in [1, 2, 3, 4, 100]:
-        if p1 < b < p99:
-            ax2.axvline(b, color='red', linestyle='--', linewidth=1.2, alpha=0.8)
-
-    plt.tight_layout()
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-    print(f"  Saved: {os.path.basename(save_path)}")
-
-
-def plot_category_breakdown(masses, save_path):
-    """Bar chart of counts per category."""
-    categories = categorize_by_mass(masses)
-    cat_names = get_category_names(tex=False)
-    colors = get_category_colors()
-
-    fig, ax = plt.subplots(figsize=(12, 7))
-    counts = [int((categories == i).sum()) for i in range(6)]
-    bars = ax.bar(range(6), counts, color=colors, alpha=0.85, edgecolor='black', linewidth=1.0)
-
-    for i, bar in enumerate(bars):
-        h = bar.get_height()
-        pct = 100.0 * counts[i] / len(masses) if len(masses) else 0.0
-        ax.text(bar.get_x() + bar.get_width() / 2.0, h, f'{counts[i]:,}\n({pct:.1f}%)',
-                ha='center', va='bottom', fontsize=10, weight='bold')
-
-    ax.set_xticks(range(6))
-    ax.set_xticklabels(cat_names, rotation=15, ha='right')
-    ax.set_ylabel('Number of jets', fontsize=12)
-    ax.set_title('Jet distribution by mass category', fontsize=14)
-
-    plt.tight_layout()
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-    print(f"  Saved: {os.path.basename(save_path)}")
-
-
-def plot_feature_comparison_normalized(X, masses, feature_names, save_dir):
-    """Normalized distributions to compare shapes across categories."""
-    os.makedirs(save_dir, exist_ok=True)
-    categories = categorize_by_mass(masses)
-    cat_names = get_category_names()
-    colors = get_category_colors()
-
-    for i, feat_name in enumerate(feature_names):
-        feat = X[:, i]
-        rng, bins, valid = _range_and_bins(feat, 0.5, 99.5, 50)
-        if rng is None:
-            continue
-
-        fig, ax = plt.subplots(figsize=(10, 8))
-        for cat_idx in range(6):
-            mask = (categories == cat_idx) & valid
-            n = int(mask.sum())
-            if n < 10:
-                continue
-            hist, edges = np.histogram(feat[mask], bins=bins)
-            if hist.sum() > 0:
-                hist = hist / hist.sum()
-            hep.histplot((hist, edges),
-                         label=f"{cat_names[cat_idx]} (n={n})",
-                         color=colors[cat_idx],
-                         histtype='step',
-                         linewidth=2,
-                         ax=ax)
-
-        ax.set_xlabel(feat_name, fontsize=14)
-        ax.set_ylabel('Normalized jets', fontsize=14)
-        ax.set_xlim(rng)
-        ax.legend(loc='best', fontsize=11, frameon=True)
-        plt.tight_layout()
-        out = os.path.join(save_dir, f"feature_normalized_{i:02d}_{safe_name(feat_name)}.png")
-        fig.savefig(out, dpi=150)
-        plt.close(fig)
-        print(f"  Saved: {os.path.basename(out)}")
-
-# =============================================================================
-# Summary PDF
-# =============================================================================
-
-def create_summary_pdf(save_dir):
-    """Create a single PDF with all PNGs in the directory."""
-    pdf_path = os.path.join(save_dir, "feature_plots_summary.pdf")
+def create_summary_pdf(save_dir: str, pdf_name: str = "feature_plots_summary.pdf"):
+    """Collect PNGs in save_dir into a single PDF for quick browsing."""
     pngs = sorted([f for f in os.listdir(save_dir) if f.lower().endswith(".png")])
     if not pngs:
-        print("  No PNG files found to create PDF")
+        print("  No PNG files found to assemble PDF")
         return
 
+    pdf_path = os.path.join(save_dir, pdf_name)
     with PdfPages(pdf_path) as pdf:
         for png in pngs:
             img = plt.imread(os.path.join(save_dir, png))
             fig = plt.figure(figsize=(11, 8.5))
             ax = fig.add_subplot(111)
             ax.imshow(img)
-            ax.axis('off')
+            ax.axis("off")
             plt.tight_layout()
-            pdf.savefig(fig, bbox_inches='tight')
+            pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
-    print(f"  Saved: feature_plots_summary.pdf, contains {len(pngs)} pages")
+    print(f"  Saved: {pdf_name}, contains {len(pngs)} pages")
 
-# =============================================================================
-# Main
-# =============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot ghost track variables split by mass categories"
+        description="Plot ghost track features grouped by signal/background classes"
     )
-    # Data
     parser.add_argument("--input-h5", nargs="+", required=True, help="Input HDF5 files")
-    parser.add_argument("--features-key", default="ghost_track_vars", help="HDF5 key for features")
-    parser.add_argument("--targets-key", default="targets", help="HDF5 key for targets, truth mass")
-
-    # Output
-    parser.add_argument("--output-dir", required=True, help="Output directory for plots")
-
-    # Options
-    parser.add_argument("--no-individual-plots", action="store_true", help="Skip individual feature plots")
-    parser.add_argument("--no-2d-plots", action="store_true", help="Skip 2D histograms")
-    parser.add_argument("--no-normalized", action="store_true", help="Skip normalized distributions")
-    parser.add_argument("--create-pdf", action="store_true", help="Create a single PDF with all PNGs")
-
+    parser.add_argument("--features-key", default="ghost_track_vars", help="Dataset name for features")
+    parser.add_argument("--targets-key", default="targets", help="Dataset name for regression target")
+    parser.add_argument("--output-dir", required=True, help="Directory for generated plots")
+    parser.add_argument("--skip-signal-background", action="store_true", help="Skip aggregated signal vs background histograms")
+    parser.add_argument("--skip-per-class", action="store_true", help="Skip per-signal-class feature histograms")
+    parser.add_argument("--skip-mass", action="store_true", help="Skip truth mass per class plots")
+    parser.add_argument("--create-pdf", action="store_true", help="Assemble all PNGs into a single summary PDF")
     args = parser.parse_args()
+
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Default feature names, replaced if length mismatches
+    print("\n" + "=" * 80)
+    print("Loading data...")
+    print("=" * 80)
+    X, y, is_signal, signal_class, class_meta = load_h5_multi(
+        args.input_h5, args.features_key, args.targets_key
+    )
+
     feature_names = [
         "nTracks",
         "deltaRLeadTrack",
-        "leadTrackPtRatio",
+        "leadTrackPt",
         "angularity_2",
         "U1_0p7",
         "M2_0p3",
         "tau2",
     ]
-
-    print("\n" + "=" * 80)
-    print("Loading data...")
-    print("=" * 80)
-    X, y = load_h5_multi(args.input_h5, args.features_key, args.targets_key)
-    print(f"\nFeature shape: {X.shape}")
-    print(f"Target shape:  {y.shape}")
-    print(f"Target range:  [{np.min(y):.3f}, {np.max(y):.3f}]")
-
     if X.shape[1] != len(feature_names):
         feature_names = [f"feature_{i}" for i in range(X.shape[1])]
 
-    categories = categorize_by_mass(y)
-    cat_names = get_category_names(tex=False)
-    print("\nJets per mass category:")
-    for i, name in enumerate(cat_names):
-        n = int((categories == i).sum())
-        pct = 100.0 * n / len(y)
-        print(f"  {name:12s}: {n:8d} jets ({pct:5.2f}%)")
+    print(f"Feature shape: {X.shape}")
+    print(f"Target shape:  {y.shape}")
+    print(f"Signal jets:   {(is_signal == 1).sum():6d}")
+    print(f"Background:    {(is_signal == 0).sum():6d}")
+
+    class_labels = _build_class_labels(class_meta)
+    if class_labels:
+        print("\nSignal class metadata:")
+        for cid in sorted(class_labels):
+            info = class_labels[cid]
+            mass = info.get("mass")
+            mass_txt = f", mass={mass:.3f} GeV" if mass is not None and np.isfinite(mass) else ""
+            print(f"  id={cid:2d}: {info.get('name')} (PID {info.get('pid', 'n/a')}{mass_txt})")
 
     print("\n" + "=" * 80)
     print("Creating plots...")
     print("=" * 80)
 
-    print("\n1. Mass distribution:")
-    plot_mass_distribution(y, os.path.join(args.output_dir, "mass_distribution.png"))
+    print("\n1. Class breakdown:")
+    plot_signal_breakdown(
+        is_signal,
+        signal_class,
+        class_labels,
+        os.path.join(args.output_dir, "class_breakdown.png"),
+    )
 
-    print("\n2. Category breakdown:")
-    plot_category_breakdown(y, os.path.join(args.output_dir, "category_breakdown.png"))
-
-    print("\n3. Feature distributions, grid:")
-    plot_feature_distributions_grid(X, y, feature_names, os.path.join(args.output_dir, "features_grid.png"))
-
-    if not args.no_individual_plots:
-        print("\n4. Individual feature distributions:")
-        plot_feature_distributions(X, y, feature_names, args.output_dir)
+    if not args.skip_signal_background:
+        print("\n2. Feature distributions by class (normalized):")
+        plot_feature_distributions_signal_background(
+            X,
+            is_signal,
+            signal_class,
+            class_labels,
+            feature_names,
+            args.output_dir,
+        )
     else:
-        print("\n4. Skipping individual feature distributions")
+        print("\n2. Skipping class overlays")
 
-    if not args.no_normalized:
-        print("\n5. Normalized feature distributions:")
-        plot_feature_comparison_normalized(X, y, feature_names, args.output_dir)
+    if not args.skip_mass:
+        print("\n3. Truth mass distributions per signal class:")
+        plot_signal_mass_distributions(
+            y,
+            signal_class,
+            class_labels,
+            args.output_dir,
+        )
     else:
-        print("\n5. Skipping normalized feature distributions")
-
-    if not args.no_2d_plots:
-        print("\n6. Feature vs mass 2D histograms:")
-        plot_feature_vs_mass(X, y, feature_names, args.output_dir)
-    else:
-        print("\n6. Skipping 2D histograms")
-
-    print("\n7. Correlation matrices:")
-    plot_correlation_matrices(X, y, feature_names, args.output_dir)
+        print("\n3. Skipping mass plots")
 
     if args.create_pdf:
-        print("\n8. Creating summary PDF:")
+        print("\n4. Creating summary PDF:")
         create_summary_pdf(args.output_dir)
 
     print("\n" + "=" * 80)
