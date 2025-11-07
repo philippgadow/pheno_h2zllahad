@@ -14,7 +14,6 @@ import h5py
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
-
 try:
     from train_regression_pytorch import MLPRegressor, SENTINEL
 except ImportError:  # pragma: no cover
