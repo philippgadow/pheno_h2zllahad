@@ -31,12 +31,19 @@ from collections import OrderedDict
 
 SENTINEL = -999999.0
 
+
+def _decode_if_bytes(value):
+    """Decode numpy byte strings into Python str."""
+    if isinstance(value, (bytes, np.bytes_)):
+        return value.decode("utf-8", errors="ignore").rstrip("\x00")
+    return str(value)
+
 # ============================================================================
 # Data Loading
 # ============================================================================
 
 
-def load_h5_file(h5_path, features_key="ghost_track_vars", targets_key="targets"):
+def load_h5_file(h5_path, features_key="ghost_track_vars", targets_key="targets", class_key="signal_class"):
     """Load features and targets from a single HDF5 file."""
     with h5py.File(h5_path, "r") as f:
         if features_key not in f:
@@ -46,25 +53,26 @@ def load_h5_file(h5_path, features_key="ghost_track_vars", targets_key="targets"
 
         X = f[features_key][:]
         y = f[targets_key][:]
+        if class_key in f:
+            signal_class = f[class_key][:]
+        else:
+            signal_class = np.full(len(y), -1, dtype=np.int64)
 
     y = np.squeeze(y)
     if y.ndim != 1:
         raise ValueError(f"{h5_path} targets must be 1D, got shape {y.shape}")
 
-    return X.astype(np.float32), y.astype(np.float32)
+    return X.astype(np.float32), y.astype(np.float32), signal_class.astype(np.int64)
 
 
 def load_h5_multi(paths, features_key="ghost_track_vars", targets_key="targets",
-                  filter_nonfinite=True):
-    """
-    Load and concatenate data from multiple HDF5 files.
-    Filters out rows with non-finite targets by default.
-    """
-    Xs, ys = [], []
+                  class_key="signal_class", filter_nonfinite=True):
+    """Load and concatenate data from multiple HDF5 files."""
+    Xs, ys, class_list = [], [], []
     feat_dim = None
 
     for p in paths:
-        X, y = load_h5_file(p, features_key, targets_key)
+        X, y, cls = load_h5_file(p, features_key, targets_key, class_key)
 
         if feat_dim is None:
             feat_dim = X.shape[1]
@@ -75,10 +83,12 @@ def load_h5_multi(paths, features_key="ghost_track_vars", targets_key="targets",
 
         Xs.append(X)
         ys.append(y)
+        class_list.append(cls)
         print(f"Loaded {len(y)} rows from {os.path.basename(p)}")
 
     X = np.concatenate(Xs, axis=0)
     y = np.concatenate(ys, axis=0)
+    classes = np.concatenate(class_list, axis=0)
 
     print(f"Total rows before filtering: {len(y)}")
 
@@ -89,16 +99,17 @@ def load_h5_multi(paths, features_key="ghost_track_vars", targets_key="targets",
             print(f"Filtering {n_dropped} rows with non-finite targets")
             X = X[mask]
             y = y[mask]
+            classes = classes[mask]
             print(f"Total rows after filtering: {len(y)}")
 
     valid_features = np.all(np.isfinite(X), axis=1)
-    # drop rows containing sentinel placeholders
     valid_features &= np.all(X != SENTINEL, axis=1)
     n_invalid = int((~valid_features).sum())
     if n_invalid > 0:
         print(f"Filtering {n_invalid} rows with invalid features")
         X = X[valid_features]
         y = y[valid_features]
+        classes = classes[valid_features]
         print(f"Total rows after feature filtering: {len(y)}")
 
     if len(y) == 0:
@@ -107,22 +118,73 @@ def load_h5_multi(paths, features_key="ghost_track_vars", targets_key="targets",
             " Check that the provided HDF5 file(s) contain signal jets with valid truth masses."
         )
 
-    return X, y
+    return X, y, classes
 
 
-def split_data(X, y, test_size=0.2, val_size=0.2, random_state=42):
-    """Split data into train/val/test sets."""
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state, shuffle=True
+def split_data(X, y, class_ids=None, test_size=0.2, val_size=0.2, random_state=42):
+    """Split data into train/val/test sets, keeping class IDs aligned if provided."""
+    arrays = [X, y]
+    if class_ids is not None:
+        arrays.append(class_ids)
+
+    split = train_test_split(
+        *arrays, test_size=test_size, random_state=random_state, shuffle=True
     )
+
+    if class_ids is not None:
+        X_temp, X_test, y_temp, y_test, c_temp, c_test = split
+    else:
+        X_temp, X_test, y_temp, y_test = split
+        c_temp = c_test = None
 
     val_fraction = val_size / (1.0 - test_size)
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, test_size=val_fraction, random_state=random_state, shuffle=True
+    arrays = [X_temp, y_temp]
+    if c_temp is not None:
+        arrays.append(c_temp)
+
+    split = train_test_split(
+        *arrays, test_size=val_fraction, random_state=random_state, shuffle=True
     )
 
+    if c_temp is not None:
+        X_train, X_val, y_train, y_val, c_train, c_val = split
+    else:
+        X_train, X_val, y_train, y_val = split
+        c_train = c_val = None
+
     print(f"Split sizes - Train: {len(y_train)}, Val: {len(y_val)}, Test: {len(y_test)}")
-    return X_train, X_val, X_test, y_train, y_val, y_test
+    return X_train, X_val, X_test, y_train, y_val, y_test, c_train, c_val, c_test
+
+
+def load_signal_class_lookup(h5_path):
+    """Load optional metadata about each signal class."""
+    lookup = {}
+    try:
+        with h5py.File(h5_path, "r") as f:
+            if "signal_class_ids" not in f:
+                return lookup
+
+            ids = f["signal_class_ids"][:]
+            names = f["signal_class_names"][:] if "signal_class_names" in f else None
+            keys = f["signal_class_keys"][:] if "signal_class_keys" in f else None
+            masses = f["signal_class_mass_GeV"][:] if "signal_class_mass_GeV" in f else None
+            truth_pids = f["signal_class_truth_pid"][:] if "signal_class_truth_pid" in f else None
+
+            for i, class_id in enumerate(ids):
+                entry = {"class_id": int(class_id)}
+                if names is not None and i < len(names):
+                    entry["name"] = _decode_if_bytes(names[i])
+                if keys is not None and i < len(keys):
+                    entry["key"] = _decode_if_bytes(keys[i])
+                if masses is not None and i < len(masses):
+                    entry["mass_GeV"] = float(masses[i])
+                if truth_pids is not None and i < len(truth_pids):
+                    entry["truth_pid"] = int(truth_pids[i])
+                lookup[int(class_id)] = entry
+    except OSError as exc:
+        print(f"Warning: failed to read signal class metadata from {h5_path}: {exc}")
+
+    return lookup
 
 
 # ============================================================================
@@ -336,6 +398,62 @@ def compute_metrics(y_true, y_pred):
     return {"mae": mae, "rmse": rmse, "r2": r2}
 
 
+def summarize_signal_performance(y_true, y_pred, class_ids, tolerance=1.0, class_lookup=None):
+    """Summarize per-class accuracy for signal jets only."""
+    if class_ids is None:
+        return {
+            "n_total": 0,
+            "n_correct": 0,
+            "n_wrong": 0,
+            "fraction_correct": None,
+            "mae": None,
+            "per_class": []
+        }
+
+    mask = class_ids >= 0
+    total = int(mask.sum())
+    if total == 0:
+        return {
+            "n_total": 0,
+            "n_correct": 0,
+            "n_wrong": 0,
+            "fraction_correct": None,
+            "mae": None,
+            "per_class": []
+        }
+
+    diffs = np.abs(y_pred[mask] - y_true[mask])
+    correct = diffs <= tolerance
+    per_class = []
+
+    unique_classes = np.unique(class_ids[mask])
+    for cls in unique_classes:
+        cls_mask = mask & (class_ids == cls)
+        cls_diffs = np.abs(y_pred[cls_mask] - y_true[cls_mask])
+        cls_correct = cls_diffs <= tolerance
+        n_cls = int(cls_mask.sum())
+        entry = {
+            "class_id": int(cls),
+            "n": n_cls,
+            "n_correct": int(cls_correct.sum()),
+            "n_wrong": int(n_cls - cls_correct.sum()),
+            "fraction_correct": float(cls_correct.mean()) if n_cls > 0 else None,
+            "mae": float(np.mean(cls_diffs)) if n_cls > 0 else None
+        }
+        if class_lookup and int(cls) in class_lookup:
+            entry.update(class_lookup[int(cls)])
+        per_class.append(entry)
+
+    return {
+        "n_total": total,
+        "n_correct": int(correct.sum()),
+        "n_wrong": int(total - correct.sum()),
+        "fraction_correct": float(correct.mean()) if total > 0 else None,
+        "mae": float(np.mean(diffs)) if total > 0 else None,
+        "per_class": per_class
+    }
+
+
 # ============================================================================
 # Plotting Functions (matching original script)
 # ============================================================================
@@ -498,6 +616,8 @@ def main():
                         help="HDF5 dataset key for features")
     parser.add_argument("--targets-key", default="targets",
                         help="HDF5 dataset key for targets (truth mass)")
+    parser.add_argument("--class-key", default="signal_class",
+                        help="HDF5 dataset key for signal class IDs")
 
     # Output arguments
     parser.add_argument("--output-dir", required=True,
@@ -516,6 +636,8 @@ def main():
                         help="Dropout rate")
     parser.add_argument("--no-batch-norm", action="store_true",
                         help="Disable batch normalization")
+    parser.add_argument("--signal-accuracy-tolerance", type=float, default=1.0,
+                        help="Tolerance in GeV to consider a signal prediction correct")
 
     # Loss function
     parser.add_argument("--loss", choices=["mse", "msle", "huber"], default="msle",
@@ -563,10 +685,28 @@ def main():
     print("Loading data...")
     print("="*80)
 
-    X, y = load_h5_multi(args.input_h5, args.features_key, args.targets_key)
+    class_lookup = load_signal_class_lookup(args.input_h5[0])
+    X, y, class_ids = load_h5_multi(
+        args.input_h5, args.features_key, args.targets_key, args.class_key
+    )
 
-    X_train, X_val, X_test, y_train, y_val, y_test = split_data(
-        X, y, test_size=args.test_split, val_size=args.val_split, random_state=args.random_seed
+    (
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test,
+        _class_train,
+        class_val,
+        class_test,
+    ) = split_data(
+        X,
+        y,
+        class_ids=class_ids,
+        test_size=args.test_split,
+        val_size=args.val_split,
+        random_state=args.random_seed,
     )
 
     # ========================================================================
@@ -677,6 +817,37 @@ def main():
     print(f"  RMSE: {test_metrics['rmse']:.6f}")
     print(f"  R²:   {test_metrics['r2']:.4f}")
 
+    signal_stats_val = summarize_signal_performance(
+        y_val_true, y_val_pred, class_val, args.signal_accuracy_tolerance, class_lookup
+    )
+    signal_stats_test = summarize_signal_performance(
+        y_test_true, y_test_pred, class_test, args.signal_accuracy_tolerance, class_lookup
+    )
+
+    print(f"\nSignal-only accuracy (±{args.signal_accuracy_tolerance:.2f} GeV tolerance):")
+
+    def _print_signal_summary(split_name, stats):
+        if stats["n_total"] == 0 or stats["fraction_correct"] is None:
+            print(f"  {split_name}: no matched signal jets.")
+            return
+        frac = stats["fraction_correct"] * 100.0
+        print(
+            f"  {split_name}: {stats['n_correct']}/{stats['n_total']} "
+            f"({frac:.1f}%) correct predictions"
+        )
+        for entry in stats["per_class"]:
+            label = entry.get("name") or entry.get("key") or f"class {entry['class_id']}"
+            mass = entry.get("mass_GeV")
+            if isinstance(mass, (float, int)) and np.isfinite(mass):
+                label = f"{label} (m={mass:.2f} GeV)"
+            print(
+                f"    - {label}: {entry['n_correct']}/{entry['n']} correct "
+                f"({entry['fraction_correct']*100:.1f}%), MAE={entry['mae']:.3f}"
+            )
+
+    _print_signal_summary("Validation", signal_stats_val)
+    _print_signal_summary("Test", signal_stats_test)
+
     # ========================================================================
     # Create Plots
     # ========================================================================
@@ -748,7 +919,12 @@ def main():
             "n_test": len(y_test),
             "n_features": X_train.shape[1],
             "input_files": [os.path.basename(f) for f in args.input_h5]
-        }
+        },
+        "signal_only": {
+            "tolerance_GeV": args.signal_accuracy_tolerance,
+            "validation": signal_stats_val,
+            "test": signal_stats_test
+        },
     }
 
     report_path = os.path.join(args.output_dir, "report.json")
@@ -764,4 +940,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-SENTINEL = -999999.0

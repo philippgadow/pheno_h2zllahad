@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_curve, auc
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -140,6 +141,22 @@ def compute_significance(y_true, y_pred, save_path):
     return best_t, best_sig
 
 
+def plot_roc_curve(y_true, y_pred, save_path):
+    fpr, tpr, _ = roc_curve(y_true, y_pred)
+    roc_auc = auc(fpr, tpr)
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
+    plt.plot([0, 1], [0, 1], "k--")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curve")
+    plt.legend(loc="lower right")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    return float(roc_auc)
+
+
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     running_loss = 0.0
@@ -175,6 +192,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train NN for jet tagging (PyTorch)")
     parser.add_argument("--input-h5", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--features-key", default="ghost_track_vars_with_reg")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -189,7 +207,10 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     X_train, X_val, X_test, y_train, y_val, y_test = load_data(
-        args.input_h5, test_size=args.test_split, random_state=args.random_state
+        args.input_h5,
+        features_key=args.features_key,
+        test_size=args.test_split,
+        random_state=args.random_state,
     )
 
     train_loader = make_loader(X_train, y_train, args.batch_size)
@@ -229,18 +250,27 @@ def main():
     best_thr, best_sig = compute_significance(
         y_val_true, y_val_pred, os.path.join(args.output_dir, "significance.png")
     )
+    val_auc = plot_roc_curve(
+        y_val_true, y_val_pred, os.path.join(args.output_dir, "roc_val.png")
+    )
 
     _, y_test_true, y_test_pred = eval_epoch(model, test_loader, criterion, device)
     plot_predictions(y_test_true, y_test_pred, os.path.join(args.output_dir, "predictions_test.png"))
+    test_auc = plot_roc_curve(
+        y_test_true, y_test_pred, os.path.join(args.output_dir, "roc_test.png")
+    )
 
     metrics = {
         "best_threshold": float(best_thr),
         "best_significance": float(best_sig),
+        "val_auc": float(val_auc),
+        "test_auc": float(test_auc),
     }
     with open(os.path.join(args.output_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
 
     print(f"Best threshold (val): {best_thr:.3f}, significance: {best_sig:.3f}")
+    print(f"Validation AUC: {val_auc:.3f}, Test AUC: {test_auc:.3f}")
     print(f"Best model saved to {best_model_path}")
 
 
