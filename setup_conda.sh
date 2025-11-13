@@ -17,6 +17,8 @@ setup_conda() {
         delphes
         fastjet
         pytorch
+        cython
+        autoconf
     )
     
     if [ ! -f ./bin/micromamba ]; then
