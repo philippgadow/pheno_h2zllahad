@@ -10,3 +10,4 @@ h5py
 rich
 torch
 fastjet
+optuna

@@ -90,7 +90,9 @@ def resolve_paths(args):
     args_path = args.args_path or os.path.join(run_dir, "args.json")
     model_path = args.model_path or os.path.join(run_dir, "best_model.pth")
     scaler_path = args.scaler_path or os.path.join(run_dir, "scaler.pkl")
-    return args_path, model_path, scaler_path
+    report_path = os.path.join(run_dir, "report.json")
+    optuna_path = os.path.join(run_dir, "optuna_best.json")
+    return args_path, model_path, scaler_path, report_path, optuna_path
 
 
 def load_training_config(args_path):
@@ -105,9 +107,35 @@ def load_scaler_if_available(scaler_path):
     return None
 
 
-def build_model(training_cfg, input_dim, device, model_path):
-    hidden_sizes = training_cfg.get("hidden_sizes", [50, 50, 50, 50, 50])
-    dropout = training_cfg.get("dropout", 0.0)
+def load_best_hyperparams(report_path, optuna_path):
+    if os.path.exists(optuna_path):
+        try:
+            with open(optuna_path, "r") as f:
+                data = json.load(f)
+            hparams = data.get("best_hyperparams") or data.get("best_params")
+            if hparams:
+                return hparams
+        except (OSError, json.JSONDecodeError):
+            pass
+    if os.path.exists(report_path):
+        try:
+            with open(report_path, "r") as f:
+                report = json.load(f)
+            hparams = report.get("hyperparameters")
+            if hparams:
+                return hparams
+        except (OSError, json.JSONDecodeError):
+            pass
+    return None
+
+
+def build_model(training_cfg, hyperparams, input_dim, device, model_path):
+    hidden_sizes = (
+        (hyperparams or {}).get("hidden_sizes")
+        or training_cfg.get("hidden_sizes")
+        or [50, 50, 50, 50, 50]
+    )
+    dropout = (hyperparams or {}).get("dropout", training_cfg.get("dropout", 0.0))
     use_batch_norm = not training_cfg.get("no_batch_norm", False)
 
     model = MLPRegressor(
@@ -172,7 +200,7 @@ def main():
         shutil.copy2(args.input_h5, args.output_h5)
         print(f"Copied '{args.input_h5}' → '{args.output_h5}'")
 
-    args_path, model_path, scaler_path = resolve_paths(args)
+    args_path, model_path, scaler_path, report_path, optuna_path = resolve_paths(args)
     if not os.path.exists(args_path):
         raise FileNotFoundError(f"Could not find training args at '{args_path}'")
     if not os.path.exists(model_path):
@@ -180,6 +208,7 @@ def main():
     if args.scaler_path and not os.path.exists(args.scaler_path):
         raise FileNotFoundError(f"Scaler path '{args.scaler_path}' does not exist")
     training_cfg = load_training_config(args_path)
+    best_hparams = load_best_hyperparams(report_path, optuna_path)
     scaler = load_scaler_if_available(scaler_path)
 
     if args.device == "auto":
@@ -193,7 +222,7 @@ def main():
             raise KeyError(f"Dataset '{args.features_key}' not found in {output_h5}")
         features = f[args.features_key][:].astype(np.float32)
 
-    model = build_model(training_cfg, features.shape[1], device, model_path)
+    model = build_model(training_cfg, best_hparams, features.shape[1], device, model_path)
 
     predictions, mask = run_inference(
         model, features, scaler, args.batch_size, device

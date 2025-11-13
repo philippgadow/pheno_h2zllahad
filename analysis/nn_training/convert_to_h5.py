@@ -468,7 +468,7 @@ class DelphesProcessor:
         vars_dict = {
             "nTracks": n_tracks,
             "deltaRLeadTrack": -999999.0,
-            "leadTrackPt": -999999.0,
+            "leadTrackPtRatio": -999999.0,
             "angularity_2": -999999.0,
             "U1_0p7": -999999.0,
             "M2_0p3": -999999.0,
@@ -482,7 +482,10 @@ class DelphesProcessor:
         lead_track = max(tracks, key=lambda t: t.pt)
         lead_track_dr = self._delta_r(jet_eta, jet_phi, lead_track.eta, lead_track.phi)
         vars_dict["deltaRLeadTrack"] = lead_track_dr
-        vars_dict["leadTrackPt"] = lead_track.pt
+
+        total_pt = sum(track.pt for track in tracks)
+        if total_pt > 0:
+            vars_dict["leadTrackPtRatio"] = lead_track.pt / total_pt
         
         # Compute track 4-vectors
         sum_px = sum_py = sum_pz = sum_energy = 0.0
@@ -500,10 +503,7 @@ class DelphesProcessor:
         jet_mass = sum_energy**2 - (sum_px**2 + sum_py**2 + sum_pz**2)
         jet_mass = np.sqrt(max(jet_mass, 0.0)) if jet_mass > 0 else 0.0
         
-        # Total track PT
-        total_pt = sum(track.pt for track in tracks)
-        
-        # Angularity with beta=2
+        # Angularity with beta=2 (requires total track PT and jet mass)
         if total_pt > 0 and jet_mass > 0:
             angularity = 0.0
             for track in tracks:
@@ -760,7 +760,7 @@ class MLDataConverter:
                 ghost_track_vars[i] = [
                     gv["nTracks"],
                     gv["deltaRLeadTrack"],
-                    gv["leadTrackPt"],
+                    gv["leadTrackPtRatio"],
                     gv["angularity_2"],
                     gv["U1_0p7"],
                     gv["M2_0p3"],

@@ -13,6 +13,10 @@ REG_OUTPUT=nn_training_output/regression
 CLS_OUTPUT=nn_training_output/classification
 BASE_H5="${OUTPUT_DIR}/jet_data.h5"
 AUG_H5="${OUTPUT_DIR}/jet_data_augmented.h5"
+REG_OPTUNA_TRIALS=${REG_OPTUNA_TRIALS:-40}
+CLS_OPTUNA_TRIALS=${CLS_OPTUNA_TRIALS:-40}
+REG_OPTUNA_DB="${REG_OUTPUT}/optuna_regression.db"
+CLS_OPTUNA_DB="${CLS_OUTPUT}/optuna_classification.db"
 
 mkdir -p "${OUTPUT_DIR}" "${PLOTS_DIR}" "${REG_OUTPUT}" "${CLS_OUTPUT}"
 
@@ -27,13 +31,17 @@ echo "[2/7] Inspecting generated HDF5 files..."
 python "${INSPECTOR}" --summary "${BASE_H5}"
 
 echo "[3/7] Plotting feature distributions across all samples..."
-python "${PLOTTER}" --input-h5 "${BASE_H5}" --output-dir "${PLOTS_DIR}"
+python "${PLOTTER}" --input-h5 "${BASE_H5}" --output-dir "${PLOTS_DIR}" --include-signal-masses "0.5,1.5,2.5,3.5"
+
 
 # train regression network
 echo "[4/7] Training regression network..."
 python ${REGRESSION} \
   --input-h5 "${BASE_H5}" \
-  --output-dir "$REG_OUTPUT"
+  --output-dir "$REG_OUTPUT" \
+  --optuna-trials "${REG_OPTUNA_TRIALS}" \
+  --optuna-study "regression_hpo" \
+  --optuna-storage "sqlite:///${REG_OPTUNA_DB}"
 
 echo "[5/7] Applying regression model back to jet_data.h5..."
 python ${REG_APPLIER} \
@@ -51,4 +59,7 @@ echo "[7/7] Training classification network..."
 python ${CLASSIFIER} \
   --input-h5 "${AUG_H5}" \
   --output-dir "$CLS_OUTPUT" \
-  --features-key ghost_track_vars_with_reg
+  --features-key ghost_track_vars_with_reg \
+  --optuna-trials "${CLS_OPTUNA_TRIALS}" \
+  --optuna-study "classification_hpo" \
+  --optuna-storage "sqlite:///${CLS_OPTUNA_DB}"

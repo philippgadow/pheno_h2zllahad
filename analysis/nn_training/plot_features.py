@@ -21,6 +21,8 @@ plt.style.use(hep.style.CMS)
 AUX_SENTINEL = -999999.0
 COLOR_BACKGROUND = "#4c72b0"
 COLOR_SIGNAL = "#dd8452"
+EXCLUDED_MASS_POINTS_GEV = {8.0}  # remove unreliable 8 GeV mass point from plots
+MASS_TOLERANCE_GEV = 1e-3
 
 
 def safe_name(s: str) -> str:
@@ -192,6 +194,114 @@ def _build_class_labels(meta: Dict[int, Dict[str, object]]) -> Dict[int, Dict[st
             "key": entry.get("key", ""),
         }
     return labels
+
+
+def _exclude_classes_by_mass(
+    X: np.ndarray,
+    y: np.ndarray,
+    is_signal: np.ndarray,
+    signal_class: np.ndarray,
+    class_labels: Dict[int, Dict[str, object]],
+    excluded_masses: Optional[set],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[int, Dict[str, object]]]:
+    if not excluded_masses:
+        return X, y, is_signal, signal_class, class_labels
+
+    excluded_ids = set()
+    for cid, info in class_labels.items():
+        mass = info.get("mass")
+        if mass is None or not np.isfinite(mass):
+            continue
+        if any(np.isclose(mass, target, atol=MASS_TOLERANCE_GEV) for target in excluded_masses):
+            excluded_ids.add(cid)
+
+    if not excluded_ids:
+        return X, y, is_signal, signal_class, class_labels
+
+    keep_mask = ~np.isin(signal_class, list(excluded_ids))
+    removed = int((~keep_mask).sum())
+    if removed == 0:
+        return X, y, is_signal, signal_class, class_labels
+
+    print("\nExcluding mass points:")
+    for cid in sorted(excluded_ids):
+        info = class_labels.get(cid, {})
+        mass = info.get("mass")
+        name = info.get("name", f"class {cid}")
+        mass_txt = f"{mass:.3f} GeV" if mass is not None and np.isfinite(mass) else "unknown mass"
+        print(f"  - {name} (id={cid}, mass={mass_txt})")
+    print(f"  Removed {removed} jets tied to the excluded masses\n")
+
+    filtered_labels = {cid: info for cid, info in class_labels.items() if cid not in excluded_ids}
+    return (
+        X[keep_mask],
+        y[keep_mask],
+        is_signal[keep_mask],
+        signal_class[keep_mask],
+        filtered_labels,
+    )
+
+
+def _filter_signal_classes_by_mass(
+    X: np.ndarray,
+    y: np.ndarray,
+    is_signal: np.ndarray,
+    signal_class: np.ndarray,
+    class_labels: Dict[int, Dict[str, object]],
+    allowed_masses: Optional[set],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[int, Dict[str, object]]]:
+    if not allowed_masses:
+        return X, y, is_signal, signal_class, class_labels
+
+    allowed_ids = set()
+    for cid, info in class_labels.items():
+        mass = info.get("mass")
+        if mass is None or not np.isfinite(mass):
+            continue
+        if any(np.isclose(mass, target, atol=MASS_TOLERANCE_GEV) for target in allowed_masses):
+            allowed_ids.add(cid)
+
+    if not allowed_ids:
+        print("Warning: no signal classes match the requested mass filter; keeping only backgrounds.")
+        keep_mask = signal_class == -1
+    else:
+        keep_mask = (signal_class == -1) | np.isin(signal_class, list(allowed_ids))
+
+    removed = int((~keep_mask).sum())
+    if removed == 0:
+        return X, y, is_signal, signal_class, class_labels
+
+    print("\nApplying signal mass filter:")
+    if allowed_ids:
+        for cid in sorted(allowed_ids):
+            info = class_labels.get(cid, {})
+            mass = info.get("mass")
+            name = info.get("name", f"class {cid}")
+            print(f"  + keeping {name} (id={cid}, mass={mass:.3f} GeV)")
+    else:
+        print("  + keeping backgrounds only (no matching signal masses)")
+    print(f"  Removed {removed} jets outside the requested mass list\n")
+
+    filtered_labels = {cid: info for cid, info in class_labels.items() if cid in allowed_ids}
+    return (
+        X[keep_mask],
+        y[keep_mask],
+        is_signal[keep_mask],
+        signal_class[keep_mask],
+        filtered_labels,
+    )
+
+
+def _parse_mass_list(arg_value: Optional[str]) -> Optional[set]:
+    if not arg_value:
+        return None
+    masses = set()
+    for token in arg_value.replace(",", " ").split():
+        try:
+            masses.add(float(token))
+        except ValueError:
+            print(f"Warning: could not parse '{token}' as a mass value; skipping.")
+    return masses or None
 
 
 def plot_signal_breakdown(
@@ -438,9 +548,12 @@ def main():
     parser.add_argument("--skip-per-class", action="store_true", help="Skip per-signal-class feature histograms")
     parser.add_argument("--skip-mass", action="store_true", help="Skip truth mass per class plots")
     parser.add_argument("--create-pdf", action="store_true", help="Assemble all PNGs into a single summary PDF")
+    parser.add_argument("--include-signal-masses", type=str, default=None,
+                        help="Comma/space separated list of signal masses (GeV) to include in plots")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+    include_masses = _parse_mass_list(args.include_signal_masses)
 
     print("\n" + "=" * 80)
     print("Loading data...")
@@ -452,7 +565,7 @@ def main():
     feature_names = [
         "nTracks",
         "deltaRLeadTrack",
-        "leadTrackPt",
+        "leadTrackPtRatio",
         "angularity_2",
         "U1_0p7",
         "M2_0p3",
@@ -461,12 +574,30 @@ def main():
     if X.shape[1] != len(feature_names):
         feature_names = [f"feature_{i}" for i in range(X.shape[1])]
 
+    class_labels = _build_class_labels(class_meta)
+    X, y, is_signal, signal_class, class_labels = _exclude_classes_by_mass(
+        X,
+        y,
+        is_signal,
+        signal_class,
+        class_labels,
+        EXCLUDED_MASS_POINTS_GEV,
+    )
+
+    X, y, is_signal, signal_class, class_labels = _filter_signal_classes_by_mass(
+        X,
+        y,
+        is_signal,
+        signal_class,
+        class_labels,
+        include_masses,
+    )
+
     print(f"Feature shape: {X.shape}")
     print(f"Target shape:  {y.shape}")
     print(f"Signal jets:   {(is_signal == 1).sum():6d}")
     print(f"Background:    {(is_signal == 0).sum():6d}")
 
-    class_labels = _build_class_labels(class_meta)
     if class_labels:
         print("\nSignal class metadata:")
         for cid in sorted(class_labels):

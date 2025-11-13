@@ -13,6 +13,7 @@ Usage:
 
 import os
 import argparse
+import copy
 import h5py
 import json
 import pickle
@@ -23,11 +24,18 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import RobustScaler, StandardScaler
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 import matplotlib
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from collections import OrderedDict
+
+try:
+    import optuna
+except ImportError:
+    optuna = None
 
 SENTINEL = -999999.0
 
@@ -185,6 +193,253 @@ def load_signal_class_lookup(h5_path):
         print(f"Warning: failed to read signal class metadata from {h5_path}: {exc}")
 
     return lookup
+
+
+def _slugify(label: str) -> str:
+    """Return a filesystem-safe slug for labeling extra evaluation outputs."""
+    if not label:
+        return "extra_eval"
+    slug = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in label)
+    slug = slug.strip("_")
+    return slug or "extra_eval"
+
+
+@dataclass
+class DatasetBundle:
+    X_train: np.ndarray
+    X_val: np.ndarray
+    X_test: np.ndarray
+    y_train: np.ndarray
+    y_val: np.ndarray
+    y_test: np.ndarray
+    class_val: Optional[np.ndarray]
+    class_test: Optional[np.ndarray]
+    class_lookup: Dict[int, Dict[str, Any]]
+    extra_X: Optional[np.ndarray] = None
+    extra_y: Optional[np.ndarray] = None
+    extra_class: Optional[np.ndarray] = None
+    extra_label: str = ""
+    extra_slug: str = ""
+    scaler: Optional[Any] = None
+    input_files: Optional[List[str]] = None
+
+
+def prepare_datasets(args) -> DatasetBundle:
+    """Load, split, and (optionally) standardize datasets once for reuse."""
+    class_lookup = load_signal_class_lookup(args.input_h5[0])
+    X, y, class_ids = load_h5_multi(
+        args.input_h5, args.features_key, args.targets_key, args.class_key
+    )
+
+    print(f"Feature shape: {X.shape}")
+    print(f"Target shape:  {y.shape}")
+    n_signal = int((class_ids >= 0).sum())
+    n_background = int((class_ids < 0).sum())
+    print(f"Signal jets:   {n_signal:6d}")
+    print(f"Background:    {n_background:6d}")
+    if class_lookup:
+        print("\nSignal class metadata:")
+        for cid in sorted(class_lookup):
+            info = class_lookup[cid]
+            mass = info.get("mass_GeV")
+            mass_txt = f", mass={mass:.3f} GeV" if mass is not None and np.isfinite(mass) else ""
+            print(f"  id={cid:2d}: {info.get('name', info.get('key', 'N/A'))}{mass_txt}")
+
+    extra_X = extra_y = extra_class = None
+    extra_label = args.extra_eval_label
+    extra_slug = _slugify(extra_label)
+    if args.extra_eval_h5:
+        print("\nLoading extra evaluation dataset(s) (not used for training)...")
+        extra_X, extra_y, extra_class = load_h5_multi(
+            args.extra_eval_h5,
+            args.features_key,
+            args.targets_key,
+            args.class_key,
+        )
+
+    (
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test,
+        _,
+        class_val,
+        class_test,
+    ) = split_data(
+        X,
+        y,
+        class_ids=class_ids,
+        test_size=args.test_split,
+        val_size=args.val_split,
+        random_state=args.random_seed,
+    )
+
+    scaler = None
+    if args.standardize != "none":
+        scaler = fit_scaler(X_train, args.standardize)
+        X_train = scaler.transform(X_train)
+        X_val = scaler.transform(X_val)
+        X_test = scaler.transform(X_test)
+        if extra_X is not None:
+            extra_X = scaler.transform(extra_X)
+
+    return DatasetBundle(
+        X_train=X_train,
+        X_val=X_val,
+        X_test=X_test,
+        y_train=y_train,
+        y_val=y_val,
+        y_test=y_test,
+        class_val=class_val,
+        class_test=class_test,
+        class_lookup=class_lookup,
+        extra_X=extra_X,
+        extra_y=extra_y,
+        extra_class=extra_class,
+        extra_label=extra_label,
+        extra_slug=extra_slug,
+        scaler=scaler,
+        input_files=args.input_h5,
+    )
+
+
+def create_loaders(data: DatasetBundle, batch_size: int):
+    """Create dataloaders for the stored numpy arrays."""
+    train_loader = make_dataloader(data.X_train, data.y_train, batch_size, shuffle=True)
+    val_loader = make_dataloader(data.X_val, data.y_val, batch_size, shuffle=False)
+    test_loader = make_dataloader(data.X_test, data.y_test, batch_size, shuffle=False)
+    extra_loader = None
+    if data.extra_X is not None and data.extra_y is not None:
+        extra_loader = make_dataloader(data.extra_X, data.extra_y, batch_size, shuffle=False)
+    return train_loader, val_loader, test_loader, extra_loader
+
+
+def hyperparams_from_args(args) -> Dict[str, Any]:
+    """Collect tunable hyperparameters from argparse Namespace."""
+    return {
+        "batch_size": args.batch_size,
+        "epochs": args.epochs,
+        "learning_rate": args.learning_rate,
+        "hidden_sizes": args.hidden_sizes,
+        "dropout": args.dropout,
+        "loss": args.loss,
+        "huber_delta": args.huber_delta,
+        "patience": args.patience,
+    }
+
+
+def merge_hyperparams(base: Dict[str, Any], overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    merged = dict(base)
+    if overrides:
+        merged.update(overrides)
+    return merged
+
+
+def suggest_optuna_overrides(trial: "optuna.trial.Trial", args) -> Dict[str, Any]:
+    """Sample hyperparameters for an Optuna trial."""
+    overrides: Dict[str, Any] = {}
+    overrides["batch_size"] = trial.suggest_categorical("batch_size", [64, 128, 256, 512])
+    overrides["learning_rate"] = trial.suggest_float("learning_rate", 3e-4, 5e-3, log=True)
+    overrides["dropout"] = trial.suggest_float("dropout", 0.0, 0.4)
+    overrides["loss"] = trial.suggest_categorical("loss", ["msle", "mse", "huber"])
+
+    n_layers = trial.suggest_int("n_layers", 2, 5)
+    hidden_sizes: List[int] = []
+    for layer in range(n_layers):
+        width = trial.suggest_int(f"hidden_size_layer_{layer}", 32, 256, step=32)
+        hidden_sizes.append(width)
+    overrides["hidden_sizes"] = hidden_sizes
+
+    if overrides["loss"] == "huber":
+        overrides["huber_delta"] = trial.suggest_float("huber_delta", 0.5, 2.0)
+    else:
+        overrides["huber_delta"] = args.huber_delta
+
+    overrides["epochs"] = args.epochs
+    overrides["patience"] = args.patience
+    return overrides
+
+
+def overrides_from_trial_params(params: Dict[str, Any], args) -> Dict[str, Any]:
+    """Reconstruct hyperparameters from Optuna trial parameters."""
+    overrides = {
+        "batch_size": int(params["batch_size"]),
+        "learning_rate": float(params["learning_rate"]),
+        "dropout": float(params["dropout"]),
+        "loss": params["loss"],
+        "epochs": args.epochs,
+        "patience": args.patience,
+    }
+    n_layers = int(params["n_layers"])
+    overrides["hidden_sizes"] = [
+        int(params[f"hidden_size_layer_{layer}"]) for layer in range(n_layers)
+    ]
+    if overrides["loss"] == "huber" and "huber_delta" in params:
+        overrides["huber_delta"] = float(params["huber_delta"])
+    else:
+        overrides["huber_delta"] = args.huber_delta
+    return overrides
+
+    extra_X = extra_y = extra_class = None
+    extra_label = args.extra_eval_label
+    extra_slug = _slugify(extra_label)
+    if args.extra_eval_h5:
+        print("\nLoading extra evaluation dataset(s) (not used for training)...")
+        extra_X, extra_y, extra_class = load_h5_multi(
+            args.extra_eval_h5,
+            args.features_key,
+            args.targets_key,
+            args.class_key,
+        )
+
+    (
+        X_train,
+        X_val,
+        X_test,
+        y_train,
+        y_val,
+        y_test,
+        _,
+        class_val,
+        class_test,
+    ) = split_data(
+        X,
+        y,
+        class_ids=class_ids,
+        test_size=args.test_split,
+        val_size=args.val_split,
+        random_state=args.random_seed,
+    )
+
+    scaler = None
+    if args.standardize != "none":
+        scaler = fit_scaler(X_train, args.standardize)
+        X_train = scaler.transform(X_train)
+        X_val = scaler.transform(X_val)
+        X_test = scaler.transform(X_test)
+        if extra_X is not None:
+            extra_X = scaler.transform(extra_X)
+
+    return DatasetBundle(
+        X_train=X_train,
+        X_val=X_val,
+        X_test=X_test,
+        y_train=y_train,
+        y_val=y_val,
+        y_test=y_test,
+        class_val=class_val,
+        class_test=class_test,
+        class_lookup=class_lookup,
+        extra_X=extra_X,
+        extra_y=extra_y,
+        extra_class=extra_class,
+        extra_label=extra_label,
+        extra_slug=extra_slug,
+        scaler=scaler,
+        input_files=args.input_h5,
+    )
 
 
 # ============================================================================
@@ -599,6 +854,312 @@ def plot_residuals(y_true, y_pred, save_path, title="Residuals"):
     plt.close()
 
 
+def run_training(
+    args,
+    data: DatasetBundle,
+    device: torch.device,
+    hyperparams: Dict[str, Any],
+    output_dir: str,
+    save_artifacts: bool = True,
+    trial: Optional["optuna.trial.Trial"] = None,
+):
+    """Execute training/evaluation with the provided hyperparameters."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    batch_size = int(hyperparams["batch_size"])
+    epochs = int(hyperparams["epochs"])
+    patience = int(hyperparams.get("patience", args.patience))
+    learning_rate = float(hyperparams["learning_rate"])
+    hidden_sizes = [int(h) for h in hyperparams["hidden_sizes"]]
+    dropout = float(hyperparams["dropout"])
+    loss_name = str(hyperparams["loss"])
+    huber_delta = float(hyperparams.get("huber_delta", args.huber_delta))
+
+    train_loader, val_loader, test_loader, extra_loader = create_loaders(data, batch_size)
+
+    model = MLPRegressor(
+        input_dim=data.X_train.shape[1],
+        hidden_sizes=hidden_sizes,
+        dropout_rate=dropout,
+        use_batch_norm=not args.no_batch_norm,
+    ).to(device)
+
+    criterion = make_loss(loss_name, huber_delta)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    best_val_loss = float("inf")
+    best_state = None
+    patience_counter = 0
+    train_losses: List[float] = []
+    val_losses: List[float] = []
+
+    if save_artifacts:
+        print("\n" + "=" * 80)
+        print("Starting training...")
+        print("=" * 80)
+
+    for epoch in range(1, epochs + 1):
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
+        val_loss, _, _ = eval_epoch(model, val_loader, criterion, device)
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+
+        if save_artifacts:
+            print(
+                f"Epoch {epoch:3d}/{epochs}  "
+                f"Train Loss: {train_loss:.6f}  "
+                f"Val Loss: {val_loss:.6f}"
+            )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            best_state = copy.deepcopy(model.state_dict())
+            if save_artifacts:
+                print(f"  → New best model (val_loss: {val_loss:.6f})")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                if save_artifacts:
+                    print(f"\nEarly stopping triggered after {epoch} epochs")
+                break
+
+        if trial is not None:
+            trial.report(val_loss, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+    if best_state is None:
+        best_state = copy.deepcopy(model.state_dict())
+
+    model.load_state_dict(best_state)
+
+    val_loss, y_val_true, y_val_pred = eval_epoch(model, val_loader, criterion, device)
+    test_loss, y_test_true, y_test_pred = eval_epoch(model, test_loader, criterion, device)
+
+    val_metrics = compute_metrics(y_val_true, y_val_pred)
+    test_metrics = compute_metrics(y_test_true, y_test_pred)
+
+    extra_loss = None
+    extra_metrics = None
+    y_extra_true = y_extra_pred = None
+    if extra_loader is not None:
+        extra_loss, y_extra_true, y_extra_pred = eval_epoch(model, extra_loader, criterion, device)
+        extra_metrics = compute_metrics(y_extra_true, y_extra_pred)
+
+    signal_stats_val = summarize_signal_performance(
+        y_val_true,
+        y_val_pred,
+        data.class_val,
+        args.signal_accuracy_tolerance,
+        data.class_lookup,
+    )
+    signal_stats_test = summarize_signal_performance(
+        y_test_true,
+        y_test_pred,
+        data.class_test,
+        args.signal_accuracy_tolerance,
+        data.class_lookup,
+    )
+
+    best_epoch = int(np.argmin(val_losses)) + 1 if val_losses else 1
+
+    results = {
+        "val_loss": float(val_loss),
+        "test_loss": float(test_loss),
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+        "extra_metrics": extra_metrics,
+        "extra_loss": float(extra_loss) if extra_loss is not None else None,
+        "train_losses": train_losses,
+        "val_losses": val_losses,
+        "signal_stats_val": signal_stats_val,
+        "signal_stats_test": signal_stats_test,
+        "best_epoch": best_epoch,
+    }
+
+    if save_artifacts:
+        print("\nValidation Results:")
+        print(f"  Loss: {val_loss:.6f}")
+        print(f"  MAE:  {val_metrics['mae']:.6f}")
+        print(f"  RMSE: {val_metrics['rmse']:.6f}")
+        print(f"  R²:   {val_metrics['r2']:.4f}")
+
+        print("\nTest Results:")
+        print(f"  Loss: {test_loss:.6f}")
+        print(f"  MAE:  {test_metrics['mae']:.6f}")
+        print(f"  RMSE: {test_metrics['rmse']:.6f}")
+        print(f"  R²:   {test_metrics['r2']:.4f}")
+
+        if extra_metrics is not None:
+            print(f"\nExtra Evaluation Results ({data.extra_label}):")
+            print(f"  Loss: {extra_loss:.6f}")
+            print(f"  MAE:  {extra_metrics['mae']:.6f}")
+            print(f"  RMSE: {extra_metrics['rmse']:.6f}")
+            print(f"  R²:   {extra_metrics['r2']:.4f}")
+
+        print(f"\nSignal-only accuracy (±{args.signal_accuracy_tolerance:.2f} GeV tolerance):")
+
+        def _print_signal_summary(split_name, stats):
+            if stats["n_total"] == 0 or stats["fraction_correct"] is None:
+                print(f"  {split_name}: no matched signal jets.")
+                return
+            frac = stats["fraction_correct"] * 100.0
+            print(
+                f"  {split_name}: {stats['n_correct']}/{stats['n_total']} "
+                f"({frac:.1f}%) correct predictions"
+            )
+            for entry in stats["per_class"]:
+                label = entry.get("name") or entry.get("key") or f"class {entry['class_id']}"
+                mass = entry.get("mass_GeV")
+                if isinstance(mass, (float, int)) and np.isfinite(mass):
+                    label = f"{label} (m={mass:.2f} GeV)"
+                print(
+                    f"    - {label}: {entry['n_correct']}/{entry['n']} correct "
+                    f"({entry['fraction_correct'] * 100:.1f}%), MAE={entry['mae']:.3f}"
+                )
+
+        _print_signal_summary("Validation", signal_stats_val)
+        _print_signal_summary("Test", signal_stats_test)
+
+        print("\n" + "=" * 80)
+        print("Creating plots...")
+        print("=" * 80)
+
+        plot_loss_curve(
+            train_losses,
+            val_losses,
+            os.path.join(output_dir, "Training_curve.png"),
+        )
+        plot_weight_distribution(model, os.path.join(output_dir, "Weights.png"))
+
+        plot_predictions_histogram(
+            y_val_true,
+            y_val_pred,
+            os.path.join(output_dir, "Reg_Val.png"),
+            title="Validation Set - Full",
+        )
+        plot_predictions_histogram(
+            y_test_true,
+            y_test_pred,
+            os.path.join(output_dir, "Reg_Test.png"),
+            title="Test Set - Full",
+        )
+        plot_predictions(
+            y_val_true,
+            y_val_pred,
+            os.path.join(output_dir, "predictions_val_scatter.png"),
+            title="Validation Set Predictions",
+        )
+        plot_predictions(
+            y_test_true,
+            y_test_pred,
+            os.path.join(output_dir, "predictions_test_scatter.png"),
+            title="Test Set Predictions",
+        )
+        plot_residuals(
+            y_val_true,
+            y_val_pred,
+            os.path.join(output_dir, "residuals_val.png"),
+            title="Validation Set Residuals",
+        )
+        plot_residuals(
+            y_test_true,
+            y_test_pred,
+            os.path.join(output_dir, "residuals_test.png"),
+            title="Test Set Residuals",
+        )
+
+        if extra_metrics is not None and y_extra_true is not None and y_extra_pred is not None:
+            plot_predictions_histogram(
+                y_extra_true,
+                y_extra_pred,
+                os.path.join(output_dir, f"Reg_{data.extra_slug}.png"),
+                title=f"{data.extra_label} Set - Full",
+            )
+            plot_predictions(
+                y_extra_true,
+                y_extra_pred,
+                os.path.join(output_dir, f"predictions_{data.extra_slug}_scatter.png"),
+                title=f"{data.extra_label} Set Predictions",
+            )
+            plot_residuals(
+                y_extra_true,
+                y_extra_pred,
+                os.path.join(output_dir, f"residuals_{data.extra_slug}.png"),
+                title=f"{data.extra_label} Set Residuals",
+            )
+
+        if data.scaler is not None:
+            scaler_path = os.path.join(output_dir, "scaler.pkl")
+            save_scaler(data.scaler, scaler_path)
+            print(f"Saved scaler to {scaler_path}")
+
+        best_model_path = os.path.join(output_dir, "best_model.pth")
+        torch.save(best_state, best_model_path)
+
+        report = {
+            "validation": {
+                "loss": float(val_loss),
+                "mae": float(val_metrics["mae"]),
+                "rmse": float(val_metrics["rmse"]),
+                "r2": float(val_metrics["r2"]),
+            },
+            "test": {
+                "loss": float(test_loss),
+                "mae": float(test_metrics["mae"]),
+                "rmse": float(test_metrics["rmse"]),
+                "r2": float(test_metrics["r2"]),
+            },
+            "training": {
+                "epochs_trained": len(train_losses),
+                "best_epoch": best_epoch,
+                "best_val_loss": float(best_val_loss),
+            },
+            "model": {
+                "architecture": hidden_sizes,
+                "n_parameters": int(sum(p.numel() for p in model.parameters() if p.requires_grad)),
+                "loss_function": loss_name,
+                "dropout": dropout,
+                "batch_norm": not args.no_batch_norm,
+            },
+            "data": {
+                "n_train": len(data.y_train),
+                "n_val": len(data.y_val),
+                "n_test": len(data.y_test),
+                "n_features": data.X_train.shape[1],
+                "input_files": [os.path.basename(f) for f in (data.input_files or [])],
+            },
+            "signal_only": {
+                "tolerance_GeV": args.signal_accuracy_tolerance,
+                "validation": signal_stats_val,
+                "test": signal_stats_test,
+            },
+            "hyperparameters": hyperparams,
+        }
+
+        if extra_metrics is not None:
+            report["extra_evaluation"] = {
+                "label": data.extra_label,
+                "loss": float(extra_loss),
+                "mae": float(extra_metrics["mae"]),
+                "rmse": float(extra_metrics["rmse"]),
+                "r2": float(extra_metrics["r2"]),
+                "n_samples": int(len(y_extra_true)) if y_extra_true is not None else 0,
+            }
+
+        report_path = os.path.join(output_dir, "report.json")
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2)
+
+        print(f"\nReport saved to {report_path}")
+        print(f"Best model saved to {best_model_path}")
+        print("\n" + "=" * 80)
+        print("Training complete!")
+        print("=" * 80)
+
+    return results
 # ============================================================================
 # Main Training Script
 # ============================================================================
@@ -609,7 +1170,6 @@ def main():
         description="Train regression MLP on ghost track variables"
     )
 
-    # Data arguments
     parser.add_argument("--input-h5", nargs="+", required=True,
                         help="Input HDF5 files")
     parser.add_argument("--features-key", default="ghost_track_vars",
@@ -618,12 +1178,12 @@ def main():
                         help="HDF5 dataset key for targets (truth mass)")
     parser.add_argument("--class-key", default="signal_class",
                         help="HDF5 dataset key for signal class IDs")
-
-    # Output arguments
     parser.add_argument("--output-dir", required=True,
                         help="Output directory for results")
-
-    # Training arguments
+    parser.add_argument("--extra-eval-h5", nargs="+", default=None,
+                        help="Optional extra HDF5 files used only for evaluation/plots")
+    parser.add_argument("--extra-eval-label", default="ZJets",
+                        help="Label for extra evaluation plots (default: ZJets)")
     parser.add_argument("--batch-size", type=int, default=100,
                         help="Batch size for training")
     parser.add_argument("--epochs", type=int, default=50,
@@ -638,304 +1198,129 @@ def main():
                         help="Disable batch normalization")
     parser.add_argument("--signal-accuracy-tolerance", type=float, default=1.0,
                         help="Tolerance in GeV to consider a signal prediction correct")
-
-    # Loss function
     parser.add_argument("--loss", choices=["mse", "msle", "huber"], default="msle",
-                        help="Loss function (default: msle to match original)")
+                        help="Loss function")
     parser.add_argument("--huber-delta", type=float, default=1.0,
                         help="Delta parameter for Huber loss")
-
-    # Data preprocessing
     parser.add_argument("--standardize", choices=["none", "standard", "robust"], default="robust",
-                        help="Standardization method (default: robust to match original)")
+                        help="Standardization method")
     parser.add_argument("--test-split", type=float, default=0.2,
                         help="Test set fraction")
     parser.add_argument("--val-split", type=float, default=0.2,
                         help="Validation set fraction")
-
-    # Early stopping
     parser.add_argument("--patience", type=int, default=10,
                         help="Early stopping patience")
-
-    # Other
     parser.add_argument("--random-seed", type=int, default=42,
                         help="Random seed")
+    parser.add_argument("--optuna-trials", type=int, default=0,
+                        help="Number of Optuna trials (0 disables HPO)")
+    parser.add_argument("--optuna-study", type=str, default=None,
+                        help="Optuna study name (optional)")
+    parser.add_argument("--optuna-storage", type=str, default=None,
+                        help="Optuna storage URI (e.g. sqlite:///study.db)")
+    parser.add_argument("--optuna-direction", choices=["minimize", "maximize"], default="minimize",
+                        help="Optimization direction")
+    parser.add_argument("--optuna-timeout", type=float, default=None,
+                        help="Optional timeout (seconds) for Optuna optimization")
+    parser.add_argument("--optuna-pruner", choices=["median", "none"], default="median",
+                        help="Pruner to use for Optuna trials")
 
     args = parser.parse_args()
 
-    # Set random seeds
+    if args.optuna_trials > 0 and optuna is None:
+        raise RuntimeError("Optuna is not installed. Please install optuna or set --optuna-trials 0.")
+
     np.random.seed(args.random_seed)
     torch.manual_seed(args.random_seed)
 
-    # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-
-    # Save arguments
     with open(os.path.join(args.output_dir, "args.json"), "w") as f:
         json.dump(vars(args), f, indent=2)
 
-    # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # ========================================================================
-    # Load Data
-    # ========================================================================
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Loading data...")
-    print("="*80)
+    print("=" * 80)
+    data_bundle = prepare_datasets(args)
+    base_hparams = hyperparams_from_args(args)
 
-    class_lookup = load_signal_class_lookup(args.input_h5[0])
-    X, y, class_ids = load_h5_multi(
-        args.input_h5, args.features_key, args.targets_key, args.class_key
-    )
-
-    (
-        X_train,
-        X_val,
-        X_test,
-        y_train,
-        y_val,
-        y_test,
-        _class_train,
-        class_val,
-        class_test,
-    ) = split_data(
-        X,
-        y,
-        class_ids=class_ids,
-        test_size=args.test_split,
-        val_size=args.val_split,
-        random_state=args.random_seed,
-    )
-
-    # ========================================================================
-    # Standardize
-    # ========================================================================
-    if args.standardize != "none":
-        scaler = fit_scaler(X_train, args.standardize)
-        X_train = scaler.transform(X_train)
-        X_val = scaler.transform(X_val)
-        X_test = scaler.transform(X_test)
-
-        scaler_path = os.path.join(args.output_dir, "scaler.pkl")
-        save_scaler(scaler, scaler_path)
-        print(f"Saved scaler to {scaler_path}")
-
-    # ========================================================================
-    # Create DataLoaders
-    # ========================================================================
-    train_loader = make_dataloader(X_train, y_train, args.batch_size, shuffle=True)
-    val_loader = make_dataloader(X_val, y_val, args.batch_size, shuffle=False)
-    test_loader = make_dataloader(X_test, y_test, args.batch_size, shuffle=False)
-
-    # ========================================================================
-    # Create Model
-    # ========================================================================
-    print("\n" + "="*80)
-    print("Creating model...")
-    print("="*80)
-
-    model = MLPRegressor(
-        input_dim=X_train.shape[1],
-        hidden_sizes=args.hidden_sizes,
-        dropout_rate=args.dropout,
-        use_batch_norm=not args.no_batch_norm
-    ).to(device)
-
-    print(model)
-
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"\nTotal trainable parameters: {n_params:,}")
-
-    # ========================================================================
-    # Training Setup
-    # ========================================================================
-    criterion = make_loss(args.loss, args.huber_delta)
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-
-    best_val_loss = float('inf')
-    patience_counter = 0
-    train_losses = []
-    val_losses = []
-
-    best_model_path = os.path.join(args.output_dir, "best_model.pth")
-
-    # ========================================================================
-    # Training Loop
-    # ========================================================================
-    print("\n" + "="*80)
-    print("Starting training...")
-    print("="*80)
-
-    for epoch in range(1, args.epochs + 1):
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
-        train_losses.append(train_loss)
-
-        val_loss, _, _ = eval_epoch(model, val_loader, criterion, device)
-        val_losses.append(val_loss)
-
-        print(f"Epoch {epoch:3d}/{args.epochs}  "
-              f"Train Loss: {train_loss:.6f}  "
-              f"Val Loss: {val_loss:.6f}")
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), best_model_path)
-            print(f"  → New best model saved (val_loss: {val_loss:.6f})")
-        else:
-            patience_counter += 1
-            if patience_counter >= args.patience:
-                print(f"\nEarly stopping triggered after {epoch} epochs")
-                break
-
-    # ========================================================================
-    # Load Best Model and Evaluate
-    # ========================================================================
-    print("\n" + "="*80)
-    print("Loading best model and evaluating...")
-    print("="*80)
-
-    model.load_state_dict(torch.load(best_model_path, map_location=device))
-
-    val_loss, y_val_true, y_val_pred = eval_epoch(model, val_loader, criterion, device)
-    test_loss, y_test_true, y_test_pred = eval_epoch(model, test_loader, criterion, device)
-
-    val_metrics = compute_metrics(y_val_true, y_val_pred)
-    test_metrics = compute_metrics(y_test_true, y_test_pred)
-
-    print("\nValidation Results:")
-    print(f"  Loss: {val_loss:.6f}")
-    print(f"  MAE:  {val_metrics['mae']:.6f}")
-    print(f"  RMSE: {val_metrics['rmse']:.6f}")
-    print(f"  R²:   {val_metrics['r2']:.4f}")
-
-    print("\nTest Results:")
-    print(f"  Loss: {test_loss:.6f}")
-    print(f"  MAE:  {test_metrics['mae']:.6f}")
-    print(f"  RMSE: {test_metrics['rmse']:.6f}")
-    print(f"  R²:   {test_metrics['r2']:.4f}")
-
-    signal_stats_val = summarize_signal_performance(
-        y_val_true, y_val_pred, class_val, args.signal_accuracy_tolerance, class_lookup
-    )
-    signal_stats_test = summarize_signal_performance(
-        y_test_true, y_test_pred, class_test, args.signal_accuracy_tolerance, class_lookup
-    )
-
-    print(f"\nSignal-only accuracy (±{args.signal_accuracy_tolerance:.2f} GeV tolerance):")
-
-    def _print_signal_summary(split_name, stats):
-        if stats["n_total"] == 0 or stats["fraction_correct"] is None:
-            print(f"  {split_name}: no matched signal jets.")
-            return
-        frac = stats["fraction_correct"] * 100.0
-        print(
-            f"  {split_name}: {stats['n_correct']}/{stats['n_total']} "
-            f"({frac:.1f}%) correct predictions"
+    if args.optuna_trials and args.optuna_trials > 0:
+        pruner = (
+            optuna.pruners.MedianPruner()
+            if args.optuna_pruner == "median"
+            else optuna.pruners.NopPruner()
         )
-        for entry in stats["per_class"]:
-            label = entry.get("name") or entry.get("key") or f"class {entry['class_id']}"
-            mass = entry.get("mass_GeV")
-            if isinstance(mass, (float, int)) and np.isfinite(mass):
-                label = f"{label} (m={mass:.2f} GeV)"
-            print(
-                f"    - {label}: {entry['n_correct']}/{entry['n']} correct "
-                f"({entry['fraction_correct']*100:.1f}%), MAE={entry['mae']:.3f}"
+        study = optuna.create_study(
+            study_name=args.optuna_study,
+            direction=args.optuna_direction,
+            storage=args.optuna_storage,
+            load_if_exists=bool(args.optuna_storage and args.optuna_study),
+            pruner=pruner,
+        )
+
+        def objective(trial: "optuna.trial.Trial"):
+            overrides = suggest_optuna_overrides(trial, args)
+            params = merge_hyperparams(base_hparams, overrides)
+            result = run_training(
+                args,
+                data_bundle,
+                device,
+                params,
+                args.output_dir,
+                save_artifacts=False,
+                trial=trial,
             )
+            if args.optuna_direction == "minimize":
+                value = result["val_loss"]
+                if not np.isfinite(value):
+                    value = np.inf
+            else:
+                value = result["val_metrics"]["r2"]
+                if not np.isfinite(value):
+                    value = -np.inf
+            return value
 
-    _print_signal_summary("Validation", signal_stats_val)
-    _print_signal_summary("Test", signal_stats_test)
+        print("\n" + "=" * 80)
+        print(f"Running Optuna study with {args.optuna_trials} trials...")
+        print("=" * 80)
+        study.optimize(objective, n_trials=args.optuna_trials, timeout=args.optuna_timeout)
 
-    # ========================================================================
-    # Create Plots
-    # ========================================================================
-    print("\n" + "="*80)
-    print("Creating plots...")
-    print("="*80)
+        best_trial = study.best_trial
+        print(f"\nBest trial #{best_trial.number}: value={best_trial.value:.6f}")
+        best_overrides = overrides_from_trial_params(best_trial.params, args)
+        final_hparams = merge_hyperparams(base_hparams, best_overrides)
 
-    plot_loss_curve(train_losses, val_losses,
-                    os.path.join(args.output_dir, "Training_curve.png"))
+        summary = {
+            "direction": args.optuna_direction,
+            "best_value": best_trial.value,
+            "best_params": best_trial.params,
+            "best_hyperparams": final_hparams,
+            "n_trials": len(study.trials),
+        }
+        summary_path = os.path.join(args.output_dir, "optuna_best.json")
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"Optuna summary saved to {summary_path}")
 
-    plot_weight_distribution(model,
-                             os.path.join(args.output_dir, "Weights.png"))
-
-    plot_predictions_histogram(y_val_true, y_val_pred,
-                               os.path.join(args.output_dir, "Reg_Val.png"),
-                               title="Validation Set - Full")
-
-    plot_predictions_histogram(y_test_true, y_test_pred,
-                               os.path.join(args.output_dir, "Reg_Test.png"),
-                               title="Test Set - Full")
-
-    plot_predictions(y_val_true, y_val_pred,
-                     os.path.join(args.output_dir, "predictions_val_scatter.png"),
-                     title="Validation Set Predictions")
-
-    plot_predictions(y_test_true, y_test_pred,
-                     os.path.join(args.output_dir, "predictions_test_scatter.png"),
-                     title="Test Set Predictions")
-
-    plot_residuals(y_val_true, y_val_pred,
-                   os.path.join(args.output_dir, "residuals_val.png"),
-                   title="Validation Set Residuals")
-
-    plot_residuals(y_test_true, y_test_pred,
-                   os.path.join(args.output_dir, "residuals_test.png"),
-                   title="Test Set Residuals")
-
-    # ========================================================================
-    # Save Report
-    # ========================================================================
-    report = {
-        "validation": {
-            "loss": float(val_loss),
-            "mae": float(val_metrics['mae']),
-            "rmse": float(val_metrics['rmse']),
-            "r2": float(val_metrics['r2'])
-        },
-        "test": {
-            "loss": float(test_loss),
-            "mae": float(test_metrics['mae']),
-            "rmse": float(test_metrics['rmse']),
-            "r2": float(test_metrics['r2'])
-        },
-        "training": {
-            "epochs_trained": len(train_losses),
-            "best_epoch": int(np.argmin(val_losses)) + 1,
-            "best_val_loss": float(best_val_loss)
-        },
-        "model": {
-            "architecture": args.hidden_sizes,
-            "n_parameters": n_params,
-            "loss_function": args.loss,
-            "dropout": args.dropout,
-            "batch_norm": not args.no_batch_norm
-        },
-        "data": {
-            "n_train": len(y_train),
-            "n_val": len(y_val),
-            "n_test": len(y_test),
-            "n_features": X_train.shape[1],
-            "input_files": [os.path.basename(f) for f in args.input_h5]
-        },
-        "signal_only": {
-            "tolerance_GeV": args.signal_accuracy_tolerance,
-            "validation": signal_stats_val,
-            "test": signal_stats_test
-        },
-    }
-
-    report_path = os.path.join(args.output_dir, "report.json")
-    with open(report_path, "w") as f:
-        json.dump(report, f, indent=2)
-
-    print(f"\nReport saved to {report_path}")
-    print(f"Best model saved to {best_model_path}")
-    print("\n" + "="*80)
-    print("Training complete!")
-    print("="*80)
+        run_training(
+            args,
+            data_bundle,
+            device,
+            final_hparams,
+            args.output_dir,
+            save_artifacts=True,
+        )
+    else:
+        run_training(
+            args,
+            data_bundle,
+            device,
+            base_hparams,
+            args.output_dir,
+            save_artifacts=True,
+        )
 
 
 if __name__ == "__main__":

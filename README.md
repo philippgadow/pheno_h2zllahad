@@ -144,27 +144,31 @@ As a result, you will find a ROOT file called with the name of the analysis `HZA
 
 ## Neural network training
 
-Before training neural networks, we will prepare the data from the Delphes ROOT files in a more suitable format.
-You can use the `analysis/convert_to_h5.py` script to convert a ROOT file to a h5 file.
+Before training neural networks, we prepare Delphes ROOT files in a dedicated HDF5 format via `analysis/nn_training/convert_to_h5.py`. This converter also computes the ghost-track observables that serve as inputs to the models, including the updated `leadTrackPtRatio` (leading-track pT divided by the sum of associated track pT).
 
 ```bash
 source setup_conda.sh
-# please replace input with the path to the delphes file and output with the name of the output file which the script will create
-python analysis/convert_to_h5.py --input output/ggH_2HDM/delphes_output_HZA_mA1.00GeV.root --output HZA_mA1.00GeV --max-constituents 20
-python analysis/convert_to_h5.py --input output/Zjets/delphes_output_Zjets.root  --output ZJetsMG5Py8 --max-constituents 20
+# replace input with the path to the Delphes file (or directory) and output with the directory you want to store the HDF5 in
+python analysis/nn_training/convert_to_h5.py \
+    --input output/ggH_2HDM/delphes_output_HZA_mA1.00GeV.root \
+    --output nn_training_input/HZA_mA1.00GeV \
+    --max-constituents 20
+
+python analysis/nn_training/convert_to_h5.py \
+    --input output/Zjets/delphes_output_Zjets.root \
+    --output nn_training_input/ZJetsMG5Py8 \
+    --max-constituents 20
 ```
 
-As a result you will have two h5 files, one for the signal and one for a dominant background process.
+Each invocation writes a `jet_data.h5` inside the chosen output directory (plus metadata files for bookkeeping). Provide all relevant signal and background samples to this step.
 
-You can train the regression neural network with the following command
+You can train the regression neural network with the PyTorch script in `analysis/nn_training/train_regression_pytorch.py`. It expects one or more HDF5 files and, by default, uses the seven ghost-track features (`nTracks`, `deltaRLeadTrack`, `leadTrackPtRatio`, `angularity_2`, `U1_0p7`, `M2_0p3`, `tau2`) to predict the truth mass. Sample invocation:
 
 ```bash
-python analysis/train_regression_pytorch.py \
-    --input-h5 HZA_mA1.00GeV/jet_data.h5 \                         
-    --features-dset jet_features \
-    --targets-dset targets \
-    --weights-dset weights \
-    --output-dir output_regression_nn \
+python analysis/nn_training/train_regression_pytorch.py \
+    --input-h5 nn_training_input/HZA_mA1.00GeV/jet_data.h5 \
+               nn_training_input/ZJetsMG5Py8/jet_data.h5 \
+    --output-dir nn_training_output/regression_mA1 \
     --batch-size 256 \
     --epochs 100 \
     --learning-rate 1e-3 \
@@ -173,8 +177,46 @@ python analysis/train_regression_pytorch.py \
     --test-split 0.2 \
     --val-split 0.2 \
     --loss huber \
-    --standardize
+    --standardize robust
 ```
+
+If you prefer to **train only on signal** but still benchmark the regressor on background jets (useful to visualize Z+jets behavior in the prediction histograms), pass the signal files via `--input-h5` and supply the background files through `--extra-eval-h5`:
+
+```bash
+python analysis/nn_training/train_regression_pytorch.py \
+    --input-h5 nn_training_input/HZA_mA1.00GeV/jet_data.h5 \
+    --extra-eval-h5 nn_training_input/ZJetsMG5Py8/jet_data.h5 \
+    --extra-eval-label ZJets \
+    --output-dir nn_training_output/regression_mA1_signalOnly \
+    ... (same optimizer/architecture flags as above)
+```
+
+The `--extra-eval-h5` samples are never used for optimization; they are only processed after training to produce an additional set of prediction histograms, scatter plots, residuals, and summary metrics (files such as `Reg_ZJets.png`, `predictions_ZJets_scatter.png`, etc.).
+
+Key options:
+
+- `--features-key`, `--targets-key`, `--class-key`: dataset names inside the HDF5 (defaults are `ghost_track_vars`, `targets`, `signal_class`).
+- `--standardize`: choose `robust`, `standard`, or `none` to control feature scaling. The scaler is stored next to the model artifacts for later inference.
+- Early stopping with patience `--patience` (default 10) prevents over-training by monitoring the validation loss.
+- Automated hyper-parameter optimisation is available by setting `--optuna-trials N` (with optional `--optuna-study`, `--optuna-storage`, etc.). During tuning, the script samples network width/depth, learning rate, dropout, batch size, loss choice, and Huber δ via Optuna, then retrains once more with the best configuration and stores the summary in `optuna_best.json`.
+
+Example Optuna run (40 trials, stored in a SQLite DB):
+
+```bash
+python analysis/nn_training/train_regression_pytorch.py \
+    --input-h5 nn_training_input/HZA_mA1.00GeV/jet_data.h5 \
+    --extra-eval-h5 nn_training_input/ZJetsMG5Py8/jet_data.h5 \
+    --output-dir nn_training_output/regression_mA1_optuna \
+    --optuna-trials 40 \
+    --optuna-study hza_regression \
+    --optuna-storage sqlite:///nn_training_output/regression_mA1_optuna/optuna.db
+```
+
+Optuna trials never write plots or models; they only update the study database and console logs. After the sweep, one final training pass using the best hyper-parameters produces the usual plots, report, scaler, and checkpoint.
+
+Outputs—including training curves, prediction plots, per-class summaries, the trained `.pt` weights, and the fitted scaler—are written below `--output-dir`. Use `run_nntraining.sh` as a reference if you prefer an end-to-end shell workflow.
+
+The classification trainer (`analysis/nn_training/train_classification_pytorch.py`) accepts the same Optuna flags, letting you maximize validation AUC (default) or minimize loss via `--optuna-direction`. Results are summarized in `optuna_best.json`, followed by a fresh training run that writes the standard plots and metrics.
 
 
 ## Data files on lxplus
