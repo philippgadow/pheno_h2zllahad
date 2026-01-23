@@ -119,6 +119,7 @@ int main(int argc, char* argv[]) {
   ssopts << ( (ISRoff) ? "_ISRoff" : "_ISRon" );
   ssopts << ( (FSRoff) ? "_FSRoff" : "_FSRon" );
   ssopts << ( (HADoff) ? "_HADoff" : "_HADon" );
+  ssopts << "_Amass" << std::fixed << std::setprecision(1) << A_Mass;  
   string stropts = ssopts.str();
 
   // Get the A mass from command-line argument.
@@ -224,12 +225,12 @@ int main(int argc, char* argv[]) {
   int nEvents = 10000;
 
   /// Histograms
-  Hist h_jet1pt("hist_jet1pt", 100,  0, 2000);
+  Hist h_jet1pt("hist_jet1pt", 100,  0,  500);
   Hist h_lep_pt("hist_lep_pt", 100,  0,  500);
   Hist h_lem_pt("hist_lem_pt", 100,  0,  500);
   Hist h_j1mass("hist_j1mass",  40,  0,   20);
   Hist h_z_mass("hist_z_mass",  60, 60,  120);
-  Hist h_mlljet("hist_mlljet", 100,  0,  300);
+  Hist h_mlljet("hist_mlljet", 100,100,  200);
   Hist h_gtproxy_nTracks("hist_proxy_nTracks",  40,   0,   40);
   Hist h_gtproxy_deltaRLead("hist_proxy_deltaRLeadTrack", 40, 0.0, 0.4);
   Hist h_gtproxy_leadPtRatio("hist_proxy_leadTrackPtRatio", 40, 0.0, 1.5);
