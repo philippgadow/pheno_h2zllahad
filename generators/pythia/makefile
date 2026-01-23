@@ -6,7 +6,7 @@ ifeq ($(mode),debug)
 CXXFLAGS += -D MYDEBUG
 endif
 
-all: main_PhPy8_HZA_dohist
+all: main_PhPy8_HZA_dohist main_PhPy8_HZA_LHEdecay
 
 CmdLine.o: CmdLine.cc CmdLine.hh
 	g++ $(CXXFLAGS) -c CmdLine.cc
@@ -16,3 +16,9 @@ main_PhPy8_HZA_dohist.o: main_PhPy8_HZA_dohist.cc
 
 main_PhPy8_HZA_dohist: main_PhPy8_HZA_dohist.o CmdLine.o
 	g++ $(CXXFLAGS) main_PhPy8_HZA_dohist.o CmdLine.o $(PYLIB) -lHepMC -o main_PhPy8_HZA_dohist
+
+main_PhPy8_HZA_LHEdecay.o: main_PhPy8_HZA_LHEdecay.cc
+	g++ $(CXXFLAGS) $(PYINC) -c main_PhPy8_HZA_LHEdecay.cc
+
+main_PhPy8_HZA_LHEdecay: main_PhPy8_HZA_LHEdecay.o
+	g++ $(CXXFLAGS) main_PhPy8_HZA_LHEdecay.o $(PYLIB) -o main_PhPy8_HZA_LHEdecay

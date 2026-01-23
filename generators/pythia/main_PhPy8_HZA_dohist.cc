@@ -213,8 +213,8 @@ int main(int argc, char* argv[]) {
   //                    "}");
 
 
-
-
+  /// default is 1 for both
+  pythia.readString("Next:numberShowProcess = 5");
   //pythia.readString("Next:numberShowEvent = 5");
 
   // --- Initialization ---
@@ -515,7 +515,7 @@ int main(int argc, char* argv[]) {
     /// Ghost-track proxies using charged final-state particles
     /// ------------------------------------------------------------------
     const double jetPt  = slowJet.pT(finjet);
-    const double jetEta = slowJet.p(finjet).eta(); 
+    const double jetEta = slowJet.p(finjet).eta();
     const double jetPhi = slowJet.phi(finjet);
     const double jetR   = 0.4;
 
