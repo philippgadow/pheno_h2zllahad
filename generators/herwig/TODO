@@ -1,0 +1,4 @@
+- understand the Herwig error:
+QTildeShowerHandler.cc: Mass of decaying particle is below constituent masses of decay products.
+happening for most of the events when the mass of A is too low
+- study how Pythia decays H->ZA

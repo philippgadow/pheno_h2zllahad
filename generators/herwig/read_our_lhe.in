@@ -51,7 +51,10 @@ library LesHouches.so
 cd /Herwig/EventHandlers
 create ThePEG::LesHouchesFileReader myReader
 #set myReader:FileName HZA_decayed_mA0.5GeV_for_herwig.lhe
-set myReader:FileName HZA_decayed_mA4.0GeV_for_herwig.lhe
+#set myReader:FileName HZA_decayed_mA1.0GeV_for_herwig.lhe
+#set myReader:FileName HZA_decayed_mA1.5GeV_for_herwig.lhe
+set myReader:FileName HZA_decayed_mA2.0GeV_for_herwig.lhe
+#set myReader:FileName HZA_decayed_mA4.0GeV_for_herwig.lhe
 create ThePEG::Cuts /Herwig/Cuts/NoCuts
 set myReader:Cuts /Herwig/Cuts/NoCuts
 #set myReader:CacheFileName cache.tmp
