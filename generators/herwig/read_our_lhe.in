@@ -1,0 +1,202 @@
+# -*- ThePEG-repository -*-
+
+##################################################
+## Collider type
+##################################################
+
+#read snippets/PPCollider.in
+
+cd /Herwig/EventHandlers
+create ThePEG::FixedCMSLuminosity Luminosity FixedCMSLuminosity.so
+set Luminosity:Energy 8000.0
+set EventHandler:LuminosityFunction Luminosity
+set EventHandler:BeamA /Herwig/Particles/p+
+set EventHandler:BeamB /Herwig/Particles/p+
+
+#cd /Herwig/Cuts
+# create the cuts object for hadron collisions
+#set Cuts:ScaleMin 2.0*GeV2
+#set Cuts:X1Min 1.0e-5
+#set Cuts:X2Min 1.0e-5
+
+# Matchbox settings
+cd /Herwig/MatrixElements/Matchbox
+set Factory:FirstPerturbativePDF Yes
+set Factory:SecondPerturbativePDF Yes
+set Factory:PartonExtractor /Herwig/Partons/PPExtractor
+
+cd /Herwig/Merging
+set MergingFactory:FirstPerturbativePDF Yes
+set MergingFactory:SecondPerturbativePDF Yes
+set MergingFactory:PartonExtractor /Herwig/Partons/PPExtractor
+
+cd /Herwig/Generators/
+set /Herwig/MatrixElements/SubProcess:PartonExtractor /Herwig/Partons/PPExtractor
+
+##################################################
+
+create ThePEG::ParticleData H0
+setup H0 35 H0 125.0 0.0 0.0 0.0 0 0 1 1
+create ThePEG::ParticleData A0
+setup A0 36 A0 4.0 0.0 0.0 0.0 0 0 1 1
+
+##################################################
+## Process selection
+##################################################
+
+# loading "LesHouches.so" library
+library LesHouches.so
+
+# inserting the lhe file
+cd /Herwig/EventHandlers
+create ThePEG::LesHouchesFileReader myReader
+#set myReader:FileName HZA_decayed_mA0.5GeV_for_herwig.lhe
+set myReader:FileName HZA_decayed_mA4.0GeV_for_herwig.lhe
+create ThePEG::Cuts /Herwig/Cuts/NoCuts
+set myReader:Cuts /Herwig/Cuts/NoCuts
+#set myReader:CacheFileName cache.tmp
+#set myReader:MaxScan 1000
+
+create ThePEG::LesHouchesEventHandler myLesHouchesHandler
+set myLesHouchesHandler:CascadeHandler /Herwig/Shower/ShowerHandler
+set myLesHouchesHandler:HadronizationHandler /Herwig/Hadronization/ClusterHadHandler
+set myLesHouchesHandler:DecayHandler /Herwig/Decays/DecayHandler
+
+insert myLesHouchesHandler:LesHouchesReaders 0 myReader
+set myLesHouchesHandler:PartonExtractor /Herwig/Partons/PPExtractor
+set myLesHouchesHandler:WeightOption VarNegWeight
+set myReader:WeightWarnings false
+
+##################################################
+# PDFs
+##################################################
+
+set myReader:InitPDFs 0
+set myReader:MomentumTreatment RescaleEnergy # momentum conservation
+
+cd /Herwig/Partons
+create ThePEG::LHAPDF myPDFset ThePEGLHAPDF.so
+set myPDFset:PDFName MMHT2014lo68cl
+set myPDFset:RemnantHandler HadronRemnants
+set /Herwig/EventHandlers/myReader:PDFA myPDFset
+set /Herwig/EventHandlers/myReader:PDFB myPDFset
+
+##################################################
+# Technical parameters for this run
+##################################################
+
+cd /Herwig/Generators
+set EventGenerator:NumberOfEvents 10000
+set EventGenerator:RandomNumberGenerator:Seed 31122001
+set EventGenerator:PrintEvent 10
+set EventGenerator:MaxErrors 10000
+
+##################################################
+# physics parameters
+##################################################
+
+cd /Herwig/Generators
+set EventGenerator:EventHandler:LuminosityFunction:Energy 8000.*GeV
+set EventGenerator:EventHandler:CascadeHandler:MPIHandler NULL
+set /Herwig/Shower/ShowerHandler:HardEmission 0
+# set /Herwig/Shower/PartnerFinder:QEDPartner IIandFF
+
+##################################################
+## Scale choice
+## See the documentation for more options
+##################################################
+
+cd /Herwig/MatrixElements/Matchbox
+set Factory:ScaleChoice Scales/SHatScale
+
+##################################################
+## Matching and shower selection
+##################################################
+
+# read Matchbox/MCatLO-DefaultShower.in
+# read Matchbox/MCatNLO-DefaultShower.in
+
+#read Matchbox/LO.in
+cd /Herwig/MatrixElements/Matchbox
+set Factory:VirtualContributions No
+set Factory:RealContributions No
+set Factory:ShowerApproximation NULL
+
+cd /Herwig/Partons
+set /Herwig/Particles/p+:PDF HardLOPDF
+set /Herwig/Particles/pbar-:PDF HardLOPDF
+set /Herwig/Partons/PPExtractor:FirstPDF HardLOPDF
+set /Herwig/Partons/PPExtractor:SecondPDF HardLOPDF
+set /Herwig/Partons/EPExtractor:SecondPDF HardLOPDF
+
+set /Herwig/Shower/ShowerHandler:PDFA ShowerLOPDF
+set /Herwig/Shower/ShowerHandler:PDFB ShowerLOPDF
+set /Herwig/DipoleShower/DipoleShowerHandler:PDFA ShowerLOPDF
+set /Herwig/DipoleShower/DipoleShowerHandler:PDFB ShowerLOPDF
+
+set /Herwig/Generators/EventGenerator:StandardModelParameters:QCD/RunningAlphaS /Herwig/Couplings/LOAlphaS
+
+set /Herwig/Shower/ShowerHandler:HardVetoReadOption PrimaryCollision
+set /Herwig/Shower/ShowerHandler:SpinCorrelations No
+set /Herwig/Shower/ShowerHandler:HardEmission MECorrection
+set /Herwig/Shower/KinematicsReconstructor:InitialStateReconOption SofterFraction
+set /Herwig/Shower/PartnerFinder:PartnerMethod 0
+set /Herwig/Shower/PartnerFinder:ScaleChoice 0
+
+set /Herwig/Shower/ShowerHandler:RestrictPhasespace Yes
+set /Herwig/Shower/ShowerHandler:MaxPtIsMuF Yes
+set /Herwig/Shower/ShowerHandler:HardScaleProfile /Herwig/MatrixElements/Matchbox/HardScaleProfile
+
+cd /Herwig/EventHandlers
+set EventHandler:CascadeHandler /Herwig/Shower/ShowerHandler
+
+#cd /Herwig/Analysis
+# create ThePEG::RivetAnalysis Rivet RivetAnalysis.so
+#create ThePEG::HepMCFile HepMC HepMCAnalysis.so
+
+##################################################
+## Handlers
+##################################################
+
+cd /Herwig/Generators
+set EventGenerator:EventHandler /Herwig/EventHandlers/myLesHouchesHandler
+# set EventGenerator:EventHandler:CascadeHandler NULL
+set EventGenerator:EventHandler:HadronizationHandler NULL
+set EventGenerator:EventHandler:DecayHandler NULL
+set /Herwig/Analysis/Basics:CheckQuark 0
+set /Herwig/Shower/ShowerHandler:Interactions QEDQCD #options: QCD, QED and QCDandQED
+# set /Herwig/Particles/W-:Stable Stable
+# set /Herwig/Particles/W+:Stable Stable
+# set /Herwig/Particles/Z0:Stable Stable
+set EventGenerator:EventHandler:StatLevel Full
+
+##################################################
+## Analyses
+##################################################
+
+#cd /Herwig/Analysis
+#insert Rivet:Analyses 0 ATLAS_2012_I1082936
+#insert /Herwig/Generators/EventGenerator:AnalysisHandlers 0 Rivet
+
+create ThePEG::HepMCFile /Herwig/Analysis/HepMC HepMCAnalysis.so
+insert /Herwig/Generators/EventGenerator:AnalysisHandlers 0 /Herwig/Analysis/HepMC
+set /Herwig/Analysis/HepMC:Format GenEventHepMC3 #GenEvent
+set /Herwig/Analysis/HepMC:Units GeV_mm
+set /Herwig/Analysis/HepMC:PrintEvent 100
+set /Herwig/Analysis/HepMC:Filename HZA_decayed_mA4.0GeV_herwig.hepmc
+
+# cd /Herwig/Analysis
+# library HepMCAnalysis.so
+# create ThePEG::HepMCFile HepMC HepMCAnalysis.so
+# insert /Herwig/Generators/EventGenerator:AnalysisHandlers 0 HepMC
+# set /Herwig/Analysis/HepMC:PrintEvent 100
+# set /Herwig/Analysis/HepMC:Filename HZA_decayed_mA4.0GeV_herwig.hepmc
+
+##################################################
+## Save the generator
+##################################################
+
+do /Herwig/MatrixElements/Matchbox/Factory:ProductionMode
+
+cd /Herwig/Generators
+saverun read_our_lhe EventGenerator
