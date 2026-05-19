@@ -20,35 +20,35 @@ CLS_OPTUNA_DB="${CLS_OUTPUT}/optuna_classification.db"
 
 mkdir -p "${OUTPUT_DIR}" "${PLOTS_DIR}" "${REG_OUTPUT}" "${CLS_OUTPUT}"
 
-# echo "[1/7] Converting Delphes ROOT files to HDF5..."
-# if [ ! -f "${BASE_H5}" ]; then
-#     python "${CONVERTER}" -i delphes -o "${OUTPUT_DIR}"
-# else
-#     echo "HDF5 file already exists, skipping conversion..."
-# fi
+echo "[1/7] Converting Delphes ROOT files to HDF5..."
+if [ ! -f "${BASE_H5}" ]; then
+    python "${CONVERTER}" -i delphes -o "${OUTPUT_DIR}"
+else
+    echo "HDF5 file already exists, skipping conversion..."
+fi
 
-# echo "[2/7] Inspecting generated HDF5 files..."
-# python "${INSPECTOR}" --summary "${BASE_H5}"
+echo "[2/7] Inspecting generated HDF5 files..."
+python "${INSPECTOR}" --summary "${BASE_H5}"
 
-# echo "[3/7] Plotting feature distributions across all samples..."
-# python "${PLOTTER}" --input-h5 "${BASE_H5}" --output-dir "${PLOTS_DIR}" --include-signal-masses "0.5,1.5,2.5,3.5"
+echo "[3/7] Plotting feature distributions across all samples..."
+python "${PLOTTER}" --input-h5 "${BASE_H5}" --output-dir "${PLOTS_DIR}" --include-signal-masses "0.5,1.5,2.5,3.5"
 
 
-# # train regression network
-# echo "[4/7] Training regression network..."
-# python ${REGRESSION} \
-#   --input-h5 "${BASE_H5}" \
-#   --output-dir "$REG_OUTPUT" \
-#   --optuna-trials "${REG_OPTUNA_TRIALS}" \
-#   --optuna-study "regression_hpo" \
-#   --optuna-storage "sqlite:///${REG_OPTUNA_DB}"
+# train regression network
+echo "[4/7] Training regression network..."
+python ${REGRESSION} \
+  --input-h5 "${BASE_H5}" \
+  --output-dir "$REG_OUTPUT" \
+  --optuna-trials "${REG_OPTUNA_TRIALS}" \
+  --optuna-study "regression_hpo" \
+  --optuna-storage "sqlite:///${REG_OPTUNA_DB}"
 
-# echo "[5/7] Applying regression model back to jet_data.h5..."
-# python ${REG_APPLIER} \
-#   --input-h5 "${BASE_H5}" \
-#   --output-h5 "${AUG_H5}" \
-#   --regression-run-dir "$REG_OUTPUT" \
-#   --overwrite
+echo "[5/7] Applying regression model back to jet_data.h5..."
+python ${REG_APPLIER} \
+  --input-h5 "${BASE_H5}" \
+  --output-h5 "${AUG_H5}" \
+  --regression-run-dir "$REG_OUTPUT" \
+  --overwrite
 
 echo "[6/7] Plotting regression outputs..."
 python ${REG_PLOTTER} \
@@ -56,13 +56,11 @@ python ${REG_PLOTTER} \
   --output "${PLOTS_DIR}/regression_output_overlay.png" \
   --include-classes 8218112266906435903 8824635442399589374
 
-
-
-# echo "[7/7] Training classification network..."
-# python ${CLASSIFIER} \
-#   --input-h5 "${AUG_H5}" \
-#   --output-dir "$CLS_OUTPUT" \
-#   --features-key ghost_track_vars_with_reg \
-#   --optuna-trials "${CLS_OPTUNA_TRIALS}" \
-#   --optuna-study "classification_hpo" \
-#   --optuna-storage "sqlite:///${CLS_OPTUNA_DB}"
+echo "[7/7] Training classification network..."
+python ${CLASSIFIER} \
+  --input-h5 "${AUG_H5}" \
+  --output-dir "$CLS_OUTPUT" \
+  --features-key ghost_track_vars_with_reg \
+  --optuna-trials "${CLS_OPTUNA_TRIALS}" \
+  --optuna-study "classification_hpo" \
+  --optuna-storage "sqlite:///${CLS_OPTUNA_DB}"
