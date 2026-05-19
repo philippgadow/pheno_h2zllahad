@@ -50,9 +50,9 @@ Install the Powheg event generator and the code required for calculating the pro
 source setup_powheg.sh
 ```
 
-3. Install Madgraph
+3. Install Madgraph (optional)
 
-Install MadGraph5aMC@NLO to generate background events on parton level as LHE files. This is used for Z+jets background.
+Install MadGraph5aMC@NLO to generate background events on parton level as LHE files. This is now optional (legacy fallback), since the default Z+jets background workflow is Powheg+Pythia.
 
 ```bash
 source setup_madgraph.sh
@@ -89,7 +89,7 @@ source run.sh
 
 This will run the following scripts in the following order.
 
-    1. `run_powheg.sh` and `run_madgraph.sh`
+    1. `run_powheg.sh` (includes ggH signal and Powheg Z→ee/μμ backgrounds)
     2. `run_pythia_signal.sh` and `run_pythia_zjets.sh`
     3. `run_delphes.sh`
 
@@ -156,7 +156,7 @@ python analysis/nn_training/convert_to_h5.py \
 
 python analysis/nn_training/convert_to_h5.py \
     --input output/Zjets/delphes_output_Zjets.root \
-    --output nn_training_input/ZJetsMG5Py8 \
+    --output nn_training_input/ZJetsPowhegPy8 \
     --max-constituents 20
 ```
 
@@ -167,7 +167,7 @@ You can train the regression neural network with the PyTorch script in `analysis
 ```bash
 python analysis/nn_training/train_regression_pytorch.py \
     --input-h5 nn_training_input/HZA_mA1.00GeV/jet_data.h5 \
-               nn_training_input/ZJetsMG5Py8/jet_data.h5 \
+               nn_training_input/ZJetsPowhegPy8/jet_data.h5 \
     --output-dir nn_training_output/regression_mA1 \
     --batch-size 256 \
     --epochs 100 \
@@ -185,7 +185,7 @@ If you prefer to **train only on signal** but still benchmark the regressor on b
 ```bash
 python analysis/nn_training/train_regression_pytorch.py \
     --input-h5 nn_training_input/HZA_mA1.00GeV/jet_data.h5 \
-    --extra-eval-h5 nn_training_input/ZJetsMG5Py8/jet_data.h5 \
+    --extra-eval-h5 nn_training_input/ZJetsPowhegPy8/jet_data.h5 \
     --extra-eval-label ZJets \
     --output-dir nn_training_output/regression_mA1_signalOnly \
     ... (same optimizer/architecture flags as above)
@@ -205,7 +205,7 @@ Example Optuna run (40 trials, stored in a SQLite DB):
 ```bash
 python analysis/nn_training/train_regression_pytorch.py \
     --input-h5 nn_training_input/HZA_mA1.00GeV/jet_data.h5 \
-    --extra-eval-h5 nn_training_input/ZJetsMG5Py8/jet_data.h5 \
+    --extra-eval-h5 nn_training_input/ZJetsPowhegPy8/jet_data.h5 \
     --output-dir nn_training_output/regression_mA1_optuna \
     --optuna-trials 40 \
     --optuna-study hza_regression \

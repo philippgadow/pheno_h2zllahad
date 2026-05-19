@@ -20,8 +20,15 @@ output/
 *.root
 *.pdf
 *.png
+jupyter/.ipynb_checkpoints/
 
 # binary files
 *.o
+
+# Compiled executables in pythia generator
+generators/pythia/main_PowhegPy8_Zjets
+generators/pythia/main_PhPy8_HZA_dohist
+generators/pythia/hists_PhPy8_HZA/
+generators/pythia/condarc-project.yaml
 
 __pycache__/

@@ -57,6 +57,13 @@ def parse_args():
         help="Explicit range for the histogram. Defaults to percentile-based.",
     )
     parser.add_argument("--logy", action="store_true", help="Use log scale on the y-axis.")
+    parser.add_argument(
+        "--include-classes",
+        type=int,
+        nargs="+",
+        metavar="CLASS_ID",
+        help="Only plot the specified signal class IDs (space-separated).",
+    )
     return parser.parse_args()
 
 
@@ -90,6 +97,7 @@ def main():
     preds = preds[mask]
     is_signal = is_signal[mask]
     signal_class = signal_class[mask] if signal_class is not None else None
+    include_classes = set(args.include_classes) if args.include_classes else None
 
     if preds.size == 0:
         raise RuntimeError("No valid regression predictions to plot.")
@@ -107,6 +115,16 @@ def main():
     sig = preds[is_signal > 0]
 
     lookup = load_signal_class_lookup(args.input_h5)
+    available_signal_classes = []
+    if signal_class is not None and sig.size > 0:
+        available_signal_classes = sorted(set(signal_class[(signal_class >= 0) & (is_signal > 0)]))
+        if include_classes is not None:
+            missing = sorted(cls for cls in include_classes if cls not in available_signal_classes)
+            if missing:
+                print(
+                    "Warning: requested signal class IDs not present in input file: "
+                    + ", ".join(str(cls) for cls in missing)
+                )
 
     def _make_plot(output_path, density=False, logy=args.logy and not density):
         fig, ax = plt.subplots(figsize=(8, 7))
@@ -123,10 +141,12 @@ def main():
             )
 
         if signal_class is not None and sig.size > 0:
-            unique_classes = sorted(set(signal_class[(signal_class >= 0) & (is_signal > 0)]))
-            if unique_classes:
-                colors = plt.cm.tab10(np.linspace(0, 1, max(1, len(unique_classes))))
-                for idx, cls in enumerate(unique_classes):
+            class_list = available_signal_classes
+            if include_classes is not None:
+                class_list = [cls for cls in class_list if cls in include_classes]
+            if class_list:
+                colors = plt.cm.tab10(np.linspace(0, 1, max(1, len(class_list))))
+                for idx, cls in enumerate(class_list):
                     mask_cls = (signal_class == cls) & (is_signal > 0)
                     cls_preds = preds[mask_cls]
                     if cls_preds.size == 0:
@@ -161,10 +181,14 @@ def main():
 
         ax.set_xlabel("Regression output")
         ax.set_ylabel("Normalized events" if density else "Events")
-        ax.set_title("Regression output distributions" + (" (normalized)" if density else ""))
         if logy:
             ax.set_yscale("log")
-            ax.set_ylim(bottom=1e-1)
+            ymin, ymax = ax.get_ylim()
+            ymin = max(ymin, 1e-1)
+            ax.set_ylim(bottom=ymin, top=ymax * 1.2)
+        else:
+            ymin, ymax = ax.get_ylim()
+            ax.set_ylim(bottom=ymin, top=ymax * 1.15)
         ax.legend(fontsize=8)
         ax.grid(True, which="both", axis="y", alpha=0.3)
 

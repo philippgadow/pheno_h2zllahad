@@ -77,3 +77,5 @@ popd
 lhapdf install NNPDF30_nlo_as_0118
 lhapdf install MSTW2008nlo68cl
 lhapdf install NNPDF23_lo_as_0130_qed
+lhapdf install CT10nlo
+lhapdf install CTEQ6L1

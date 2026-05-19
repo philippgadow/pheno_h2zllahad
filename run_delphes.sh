@@ -34,4 +34,15 @@ run_delphes ${OUTPUTDIR}/hepmc_output_HZA_mA8.00GeV.hepmc
 
 # Run Delphes with CMS card for backgrounds
 OUTPUTDIR=output/Zjets
-run_delphes ${OUTPUTDIR}/hepmc_output_Zjets.hepmc
+
+if [[ -f ${OUTPUTDIR}/hepmc_output_Zjets_Zee.hepmc ]]; then
+    run_delphes ${OUTPUTDIR}/hepmc_output_Zjets_Zee.hepmc
+fi
+
+if [[ -f ${OUTPUTDIR}/hepmc_output_Zjets_Zmumu.hepmc ]]; then
+    run_delphes ${OUTPUTDIR}/hepmc_output_Zjets_Zmumu.hepmc
+fi
+
+if [[ -f ${OUTPUTDIR}/hepmc_output_Zjets.hepmc ]]; then
+    run_delphes ${OUTPUTDIR}/hepmc_output_Zjets.hepmc
+fi

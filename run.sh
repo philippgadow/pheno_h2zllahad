@@ -1,10 +1,15 @@
 #!/bin/bash
 
+
 # Run all steps of event generation in one go
 
-# 1) Run calculation of hard scattering process ggH with Powheg and MadGraph
+# 1) Run hard-scattering generation with POWHEG
 ./run_powheg.sh
-./run_madgraph.sh
+
+# Optional legacy MG5 Z+jets generation (disabled by default)
+if [[ "${USE_MG5_ZJETS:-0}" == "1" ]]; then
+	./run_madgraph.sh
+fi
 
 # 2) Run showering and hadronization with Pythia
 #    -> this is where the decay H -> Z(ll) a(had) is done

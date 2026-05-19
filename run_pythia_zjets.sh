@@ -3,8 +3,8 @@
 # Set output directory
 OUTPUTDIR=output/Zjets
 
-# install PDF sets with LHAPDF
-lhapdf install NNPDF23_lo_as_0130_qed
+# install PDF sets with LHAPDF when available under this exact alias
+lhapdf install CTEQ6L1 || true
 
 # Function to compile pythia
 compile_pythia() {
@@ -18,19 +18,27 @@ compile_pythia() {
 
 pushd generators/pythia
     # Compile pythia
-    compile_pythia main_MG5Py8_Zjets.cc
+    compile_pythia main_PowhegPy8_Zjets.cc
 
-    # Copy LHE and decompress input files
-    cp ../../${OUTPUTDIR}/unweighted_events.lhe.gz unweighted_events.lhe.gz
-    gzip -d unweighted_events.lhe.gz
-    mv unweighted_events.lhe input.lhe
+    run_powheg_lhe() {
+        local lhe_input=$1
+        local hepmc_output=$2
+        echo "Showering ${lhe_input} -> ${hepmc_output}"
+        ./main_PowhegPy8_Zjets "${lhe_input}" "${hepmc_output}" "${ZJETS_PYTHIA_MAXEVENTS:-0}"
+    }
 
-    # Run pythia for SM processes
-    ./main_MG5Py8_Zjets
+    # POWHEG channels (preferred): Zee and Zmumu
+    if [[ -f ../../${OUTPUTDIR}/pwgevents_Zee_powheg.lhe ]]; then
+        run_powheg_lhe ../../${OUTPUTDIR}/pwgevents_Zee_powheg.lhe hepmc_output_Zjets_Zee.hepmc
+    fi
+
+    if [[ -f ../../${OUTPUTDIR}/pwgevents_Zmumu_powheg.lhe ]]; then
+        run_powheg_lhe ../../${OUTPUTDIR}/pwgevents_Zmumu_powheg.lhe hepmc_output_Zjets_Zmumu.hepmc
+    fi
 
     # Move the HepMC output files to the output directory
     mv *.hepmc ../../${OUTPUTDIR}/
 
     # Clean up
-    rm input.lhe
+    rm -f input.lhe
 popd
