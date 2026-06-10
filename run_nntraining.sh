@@ -53,7 +53,8 @@ python ${REG_APPLIER} \
 echo "[6/7] Plotting regression outputs..."
 python ${REG_PLOTTER} \
   --input-h5 "${AUG_H5}" \
-  --output "${PLOTS_DIR}/regression_output_overlay.png"
+  --output "${PLOTS_DIR}/regression_output_overlay.png" \
+  --include-classes 8218112266906435903 8824635442399589374
 
 echo "[7/7] Training classification network..."
 python ${CLASSIFIER} \
